@@ -79,7 +79,7 @@
                                  -LookbackMinutes 15 -Direction Both
 
 .NOTES
-    Author : DATAGROUP - Jan Hubener
+    Author : Jan Hubener
     Repo   : PSScript / Get-PRTGMailFlowHealth
 #>
 
