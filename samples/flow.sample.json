@@ -1,0 +1,32 @@
+{
+  "TenantId": "00000000-0000-0000-0000-000000000000",
+  "ClientId": "11111111-1111-1111-1111-111111111111",
+  "Organization": "contoso.onmicrosoft.com",
+
+  "CredentialSource": "Cert",
+  "Cert": {
+    "Thumbprint": "1234567890ABCDEF1234567890ABCDEF12345678",
+    "Store": "LocalMachine"
+  },
+
+  "LookbackMinutes": 15,
+  "Direction": "Both",
+  "Domain": ["contoso.de"],
+
+  "WarningPctFailed":         5.0,
+  "ErrorPctFailed":          15.0,
+  "WarningPctPending":        5.0,
+  "ErrorPctPending":         20.0,
+
+  "WarningRecipientNotFound": 5,
+  "ErrorRecipientNotFound":   0,
+
+  "WarningLoops": 1,
+  "ErrorLoops":  10,
+
+  "DeepInspect": false,
+  "MaxTracePages": 5,
+  "TraceResultSize": 5000,
+
+  "OutputFormat": "Json"
+}
