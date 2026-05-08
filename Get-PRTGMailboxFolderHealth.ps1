@@ -1086,6 +1086,8 @@ $shouldAutoRun = (-not $NoAutoRun) -and
                  (-not $ExecutionContext.SessionState.Module) -and
                  ($MyInvocation.InvocationName -ne '.') -and
                  ($MyInvocation.Line -notmatch '^\s*\.\s+') -and
+                 ($MyInvocation.Line -notmatch '\bImport-Module\b') -and
+                 ($MyInvocation.MyCommand.ScriptBlock.Module -eq $null) -and
                  ($PSCommandPath)
 
 if ($shouldAutoRun) {
