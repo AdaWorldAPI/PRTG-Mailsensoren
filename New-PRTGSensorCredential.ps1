@@ -483,41 +483,60 @@ if ($TestToken) {
     Write-Host ""
     Write-Step "Self-test (Graph token acquisition)" -Level Step
 
-    # Snapshot the helper's params BEFORE Import-Module. Importing a .ps1
-    # module triggers its param() block in the current scope, clobbering
-    # $TenantId / $ClientId with empty strings (PowerShell quirk - .ps1 import
-    # is dot-source-like for parameter binding). We work AROUND this rather
-    # than trying to restore the originals: PowerShell's parser flags
-    # CmdletBinding param-bound variables as "optimised", so a later
-    # `$TenantId = $saved` throws "variable has been optimized". Just keep
-    # using the saved copies explicitly.
-    $tidSaved = $TenantId
-    $cidSaved = $ClientId
-
     $resolverPath = Join-Path $PSScriptRoot 'Get-PRTGMailboxFolderHealth.ps1'
-    if (Test-Path $resolverPath) {
-        $importedModule = $null
-        try {
-            $importedModule = Import-Module $resolverPath -Force `
-                                  -DisableNameChecking -PassThru `
-                                  -ErrorAction Stop
-
-            $cred  = Resolve-SensorCredential -Config $cfg
-            $token = Get-GraphAccessToken -TenantId $tidSaved -ClientId $cidSaved `
-                        -ClientSecret $cred.ClientSecret `
-                        -CertificateThumbprint $cred.CertificateThumbprint
-            if ($token) {
-                Write-Step "Graph token acquired (length=$($token.Length))" -Level OK
+    if (-not (Test-Path $resolverPath)) {
+        Write-Step "Sensor script not found next to this helper; skipping self-test." -Level Warn
+    }
+    else {
+        # Wrap in a script-block with deliberately non-colliding parameter names.
+        # The resolver's param() block declares $TenantId, $ClientId, $Config,
+        # etc. Importing it via Import-Module/dot-source would try to re-bind
+        # those into the calling scope - and since this script declares
+        # $TenantId/$ClientId as CmdletBinding params, the parser has marked
+        # them "optimised" and rejects the rebind with the unhelpful
+        # "variable has been optimized" error (especially on Windows PS 5.1
+        # where StrictMode is effectively on).
+        #
+        # Putting the import inside a script-block called via & gives us a
+        # fresh local scope, and naming the wrapper params $_tid / $_cid /
+        # $_cfg / $_path means there is nothing for the resolver's param
+        # block to clash with.
+        $selfTest = {
+            param($_tid, $_cid, $_cfg, $_path)
+            $imp = $null
+            try {
+                $imp = Import-Module $_path -Force -DisableNameChecking `
+                                     -PassThru -ErrorAction Stop
+                $cred  = Resolve-SensorCredential -Config $_cfg
+                $token = Get-GraphAccessToken `
+                            -TenantId $_tid `
+                            -ClientId $_cid `
+                            -ClientSecret $cred.ClientSecret `
+                            -CertificateThumbprint $cred.CertificateThumbprint
+                return [pscustomobject]@{ Ok = $true; Token = $token; Method = $cred.Method }
+            }
+            catch {
+                return [pscustomobject]@{ Ok = $false; Error = $_.Exception.Message; Method = $null }
+            }
+            finally {
+                if ($imp) { Remove-Module $imp -Force -ErrorAction SilentlyContinue }
             }
         }
-        catch {
-            Write-Step "Self-test FAILED: $($_.Exception.Message)" -Level Err
-            $msg = $_.Exception.Message
-            if ($Method -like 'Cert*' -and $msg -match 'AADSTS70002[12]|certificate') {
-                Write-Step "Cert nicht in App Registration hochgeladen oder Thumbprint mismatch." -Level Warn
+
+        $r = & $selfTest $TenantId $ClientId $cfg $resolverPath
+
+        if ($r.Ok) {
+            Write-Step "Graph token acquired (length=$($r.Token.Length), via $($r.Method))" -Level OK
+        }
+        else {
+            Write-Step "Self-test FAILED: $($r.Error)" -Level Err
+            $msg = $r.Error
+            if ($Method -like 'Cert*' -and $msg -match 'AADSTS70002[12]|certificate.*not.*registered|key was not found') {
+                Write-Step "Cert noch nicht in App Registration hochgeladen oder Thumbprint mismatch." -Level Warn
+                Write-Step "  -> .CER hochladen: $($azureUpload.File)" -Level Warn
             }
             elseif ($msg -match 'AADSTS90002|Tenant.*not.*found') {
-                Write-Step "TenantId scheint falsch zu sein. In Entra: Overview -> Tenant ID (= Directory ID)." -Level Warn
+                Write-Step "TenantId scheint falsch zu sein. In Entra: Overview -> Tenant ID." -Level Warn
             }
             elseif ($msg -match 'AADSTS700016|application.*not.*found') {
                 Write-Step "ClientId (Application ID) scheint falsch zu sein." -Level Warn
@@ -526,14 +545,6 @@ if ($TestToken) {
                 Write-Step "Did you upload the .CER to the App Registration?" -Level Warn
             }
         }
-        finally {
-            if ($importedModule) {
-                Remove-Module $importedModule -Force -ErrorAction SilentlyContinue
-            }
-        }
-    }
-    else {
-        Write-Step "Sensor script not found next to this helper; skipping self-test." -Level Warn
     }
 }
 
