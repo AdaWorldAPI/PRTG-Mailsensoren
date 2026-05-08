@@ -122,6 +122,11 @@ param(
     [switch]$NoAutoRun
 )
 
+# TLS 1.2 hardening - Win PS 5.1 defaults to SSL3/TLS 1.0 which Microsoft
+# endpoints rejected since 2022. Idempotent OR-in.
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
+
 # =====================================================================
 #  Logging - stderr only
 # =====================================================================
@@ -239,32 +244,6 @@ function Get-FailureBucket {
 # =====================================================================
 
 
-# =====================================================================
-#  TLS hardening - Win PS 5.1 defaults to SSL3/TLS 1.0 which Microsoft
-#  endpoints rejected since 2022. Idempotent; safe to call repeatedly.
-# =====================================================================
-
-function Set-TlsDefaults {
-    [CmdletBinding()] param()
-    try {
-        $current = [Net.ServicePointManager]::SecurityProtocol
-        $needed  = [Net.SecurityProtocolType]::Tls12
-        if (-not (($current -band $needed) -eq $needed)) {
-            [Net.ServicePointManager]::SecurityProtocol = $current -bor $needed
-        }
-        # Tls13 is fine to add too where supported (PS 5.1+ on WS2022)
-        $tls13 = [enum]::GetValues([Net.SecurityProtocolType]) |
-                    Where-Object { $_.ToString() -eq 'Tls13' } | Select-Object -First 1
-        if ($tls13 -and -not (([Net.ServicePointManager]::SecurityProtocol -band $tls13) -eq $tls13)) {
-            try { [Net.ServicePointManager]::SecurityProtocol = `
-                    [Net.ServicePointManager]::SecurityProtocol -bor $tls13 } catch {}
-        }
-    }
-    catch {
-        # Don't let TLS enforcement itself crash the sensor
-    }
-}
-
 function Connect-FlowEXO {
     [CmdletBinding()]
     param(
@@ -272,7 +251,6 @@ function Connect-FlowEXO {
         [Parameter(Mandatory)] [string]$CertificateThumbprint,
         [Parameter(Mandatory)] [string]$Organization
     )
-    Set-TlsDefaults
 
 
     if (-not (Get-Module -ListAvailable -Name ExchangeOnlineManagement)) {
@@ -313,7 +291,6 @@ function Get-FlowMessages {
         [int]$ResultSize           = 5000,
         [int]$MaxPages             = 5
     )
-    Set-TlsDefaults
 
 
     $hasV2 = (Get-Command Get-MessageTraceV2 -ErrorAction SilentlyContinue) -ne $null
