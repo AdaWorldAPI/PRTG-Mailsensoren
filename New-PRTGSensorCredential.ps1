@@ -483,30 +483,27 @@ if ($TestToken) {
     Write-Host ""
     Write-Step "Self-test (Graph token acquisition)" -Level Step
 
-    # Snapshot helper params - even with Import-Module, defensively guard
-    # against any later refactor that re-introduces dot-source.
-    $savedTenantId = $TenantId
-    $savedClientId = $ClientId
+    # Snapshot the helper's params BEFORE Import-Module. Importing a .ps1
+    # module triggers its param() block in the current scope, clobbering
+    # $TenantId / $ClientId with empty strings (PowerShell quirk - .ps1 import
+    # is dot-source-like for parameter binding). We work AROUND this rather
+    # than trying to restore the originals: PowerShell's parser flags
+    # CmdletBinding param-bound variables as "optimised", so a later
+    # `$TenantId = $saved` throws "variable has been optimized". Just keep
+    # using the saved copies explicitly.
+    $tidSaved = $TenantId
+    $cidSaved = $ClientId
 
     $resolverPath = Join-Path $PSScriptRoot 'Get-PRTGMailboxFolderHealth.ps1'
     if (Test-Path $resolverPath) {
-        # Import-Module instead of dot-source: the resolver script's own
-        # param() block declares $TenantId / $ClientId, and dot-sourcing would
-        # clobber the helper's variables with the resolver's defaults
-        # (= empty string). Module load runs in module scope and does not
-        # leak parameter variables into the calling scope.
         $importedModule = $null
         try {
             $importedModule = Import-Module $resolverPath -Force `
                                   -DisableNameChecking -PassThru `
                                   -ErrorAction Stop
 
-            # Restore in case any earlier refactor still pollutes
-            $TenantId = $savedTenantId
-            $ClientId = $savedClientId
-
             $cred  = Resolve-SensorCredential -Config $cfg
-            $token = Get-GraphAccessToken -TenantId $TenantId -ClientId $ClientId `
+            $token = Get-GraphAccessToken -TenantId $tidSaved -ClientId $cidSaved `
                         -ClientSecret $cred.ClientSecret `
                         -CertificateThumbprint $cred.CertificateThumbprint
             if ($token) {
@@ -515,7 +512,17 @@ if ($TestToken) {
         }
         catch {
             Write-Step "Self-test FAILED: $($_.Exception.Message)" -Level Err
-            if ($Method -like 'Cert*') {
+            $msg = $_.Exception.Message
+            if ($Method -like 'Cert*' -and $msg -match 'AADSTS70002[12]|certificate') {
+                Write-Step "Cert nicht in App Registration hochgeladen oder Thumbprint mismatch." -Level Warn
+            }
+            elseif ($msg -match 'AADSTS90002|Tenant.*not.*found') {
+                Write-Step "TenantId scheint falsch zu sein. In Entra: Overview -> Tenant ID (= Directory ID)." -Level Warn
+            }
+            elseif ($msg -match 'AADSTS700016|application.*not.*found') {
+                Write-Step "ClientId (Application ID) scheint falsch zu sein." -Level Warn
+            }
+            elseif ($Method -like 'Cert*') {
                 Write-Step "Did you upload the .CER to the App Registration?" -Level Warn
             }
         }
