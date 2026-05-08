@@ -184,15 +184,21 @@ function Import-SensorConfig {
     [CmdletBinding()]
     param([string]$Path)
 
-    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $null }
+    if (-not $Path) { return $null }
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        # Loud failure - empty config -> empty TenantId -> cryptic bind error
+        # downstream. Throw with a clear message so the caller produces a
+        # PRTG error envelope pointing at the actual problem.
+        throw "Config file not found: '$Path'. Check the -Config path."
+    }
 
     try {
         $raw = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop |
                ConvertFrom-Json -ErrorAction Stop
     }
     catch {
-        Write-SensorLog "Config '$Path' could not be parsed: $_" -Level Error
-        return $null
+        throw "Config '$Path' could not be parsed: $($_.Exception.Message)"
     }
 
     # Decrypt *Encrypted fields (DPAPI, current user / machine)
@@ -972,8 +978,18 @@ function Invoke-PRTGFolderSensor {
     # 1. Layer config under CLI args
     $effective = @{}
     if ($Bound.Config) {
-        $cfg = Import-SensorConfig -Path $Bound.Config
-        if ($cfg) { foreach ($k in $cfg.Keys) { $effective[$k] = $cfg[$k] } }
+        try {
+            $cfg = Import-SensorConfig -Path $Bound.Config
+            if ($cfg) { foreach ($k in $cfg.Keys) { $effective[$k] = $cfg[$k] } }
+        }
+        catch {
+            $err = $_.Exception.Message
+            Write-SensorLog $err -Level Error
+            $fmt = if ($Bound.OutputFormat -eq 'KeyValue') { 'KeyValue' } else { 'Json' }
+            if ($fmt -eq 'KeyValue') { Write-Output "-1:${err}" }
+            else { Write-Output (@{ prtg = @{ error = 1; text = $err } } | ConvertTo-Json -Depth 4) }
+            return
+        }
     }
     foreach ($k in $Bound.Keys) {
         if ($null -ne $Bound[$k] -and $Bound[$k] -isnot [switch]) {
