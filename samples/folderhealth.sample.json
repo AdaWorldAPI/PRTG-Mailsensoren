@@ -1,0 +1,26 @@
+{
+    "_comment_top": "Sample config for Get-PRTGMailboxFolderHealth.ps1. Drop next to the script in C:\\Program Files (x86)\\PRTG Network Monitor\\Custom Sensors\\EXEXML\\ and reference via -Config '...'. Sensitive values (ClientSecret, anything ending in 'Encrypted') are decrypted with DPAPI; encrypt them on the probe with: ConvertTo-SecureString -AsPlainText -Force '...' | ConvertFrom-SecureString",
+
+    "Mode":      "Graph",
+
+    "TenantId":  "00000000-0000-0000-0000-000000000000",
+    "ClientId":  "11111111-1111-1111-1111-111111111111",
+
+    "_comment_auth": "Use ONE of: ClientSecretEncrypted, ClientSecret, or CertificateThumbprint. Cert + ThumbprintInLocalMachine\\My is preferred.",
+    "ClientSecretEncrypted": "01000000d08c9ddf0115d1118c7a00c04fc297eb...",
+    "CertificateThumbprint": "",
+
+    "Folders":         ["Inbox", "VM Fehler", "VM in Arbeit"],
+    "OneHourFolders":  ["Inbox", "VM in Arbeit"],
+    "ThresholdMinutes": 60,
+
+    "WarningCount":    25,
+    "ErrorCount":     100,
+    "WarningCount1H":   1,
+    "ErrorCount1H":     5,
+
+    "_comment_legacy": "For Mode=Legacy, ClientId + CertificateThumbprint + Organization (e.g. contoso.onmicrosoft.com) must be set. The ExchangeOnlineManagement module must be installed on the probe.",
+    "Organization":    "contoso.onmicrosoft.com",
+
+    "OutputFormat":    "Json"
+}
