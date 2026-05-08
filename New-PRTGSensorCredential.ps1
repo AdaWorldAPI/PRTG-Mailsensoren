@@ -32,7 +32,7 @@
 
 .PARAMETER ConfigPath
     Where to write the resulting config JSON. Default:
-    C:\ProgramData\DATAGROUP\PRTGSensors\folderhealth.json
+    C:\ProgramData\PRTGSensors\folderhealth.json
 
 .PARAMETER ClientSecret
     SecureString. Required for Plain / DPAPI-* / XOR / Registry-* / CredMgr.
@@ -55,10 +55,10 @@
 
 .PARAMETER XORKeyFile
     XOR mode. Path to keyfile. Created if not present (256 random bytes).
-    Default: C:\ProgramData\DATAGROUP\PRTGSensors\sensor.key
+    Default: C:\ProgramData\PRTGSensors\sensor.key
 
 .PARAMETER RegistryPath
-    Registry-* modes. Default HKLM:\Software\DATAGROUP\PRTGSensors\Default
+    Registry-* modes. Default HKLM:\Software\PRTGSensors\Default
     (or HKCU equivalent for Registry-CU).
 
 .PARAMETER CredentialName
@@ -87,7 +87,7 @@
         -XORKeyFile 'D:\PRTG\Keys\bsm.key'
 
 .NOTES
-    Author : DATAGROUP - Jan Hubener
+    Author : Jan Hubener
     Repo   : PSScript / Get-PRTGMailboxFolderHealth (helpers)
 #>
 
@@ -104,7 +104,7 @@ param(
     [Parameter(Mandatory)]
     [string]$ClientId,
 
-    [string]$ConfigPath = (Join-Path $env:ProgramData 'DATAGROUP\PRTGSensors\folderhealth.json'),
+    [string]$ConfigPath = (Join-Path $env:ProgramData 'PRTGSensors\folderhealth.json'),
 
     # Secret modes
     [securestring]$ClientSecret,
@@ -116,7 +116,7 @@ param(
     [securestring]$PfxPassword,
 
     # XOR mode
-    [string]$XORKeyFile      = (Join-Path $env:ProgramData 'DATAGROUP\PRTGSensors\sensor.key'),
+    [string]$XORKeyFile      = (Join-Path $env:ProgramData 'PRTGSensors\sensor.key'),
 
     # Registry modes
     [string]$RegistryPath,
@@ -340,7 +340,7 @@ function New-RegistryCredential {
 
     if (-not $Path) {
         $hive = if ($Scope -eq 'LocalMachine') { 'HKLM:' } else { 'HKCU:' }
-        $Path = "${hive}\Software\DATAGROUP\PRTGSensors\Default"
+        $Path = "${hive}\Software\PRTGSensors\Default"
     }
     if ($Scope -eq 'LocalMachine' -and -not (Test-Elevation)) {
         throw "Registry-LM requires elevated PowerShell."
