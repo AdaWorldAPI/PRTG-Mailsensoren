@@ -9,9 +9,9 @@ Microsoft 365 Mailbox-Sensoren für PRTG Network Monitor — cloud-natives Monit
 | `Get-PRTGMailboxFolderHealth.ps1` | Folder-Sensor (Inbox / Custom Folders, ItemCount + 1H-Aging) — Graph primär, Get-MailboxFolderStatistics als Backup |
 | `Get-PRTGMailFlowHealth.ps1`      | Mail-Flow-Sensor (% Failed/Pending) mit Klassifikator für Auto-Replies, NDR-Bounces, Mail-Loops |
 | `New-PRTGSensorCredential.ps1`    | Credential-Provisioning-Helper (Cert-Erzeugung + 6 Speicherformen) |
-| `folderhealth.sample.json`        | Beispiel-Config für Folder-Sensor |
-| `flow.sample.json`                | Beispiel-Config für Mail-Flow-Sensor |
-| `PRTG-MailboxSensoren-Dokumentation.pdf` | Vollständige technische Dokumentation (DATAGROUP-Branding, ~12 Seiten) |
+| `samples/folderhealth.sample.json`| Beispiel-Config für Folder-Sensor |
+| `samples/flow.sample.json`        | Beispiel-Config für Mail-Flow-Sensor |
+| `doc/PRTG-MailboxSensoren-Dokumentation.pdf` | Vollständige technische Dokumentation (~12 Seiten) |
 
 ## Schnellstart
 
@@ -33,7 +33,7 @@ Microsoft 365 Mailbox-Sensoren für PRTG Network Monitor — cloud-natives Monit
 Erzeugt:
 - Self-Signed Cert (RSA-2048, SHA-256, 2 Jahre) in `Cert:\LocalMachine\My`
 - `.cer` auf dem Desktop für den Upload in die App Registration
-- `C:\ProgramData\DATAGROUP\PRTGSensors\folderhealth.json` mit Thumbprint + ACL-Härtung
+- `C:\ProgramData\PRTGSensors\folderhealth.json` mit Thumbprint + ACL-Härtung
 
 ### 3. Sensoren im EXEXML-Verzeichnis ablegen
 
@@ -77,7 +77,7 @@ $h = Get-MailboxFolderHealth -Mailbox bsm@contoso.de -Folders Inbox -AsObject
 
 ## Schwellwert-Design (Mail-Flow)
 
-Der Recipient-Not-Found-Channel hat absichtlich **keine** Error-Schwelle. Auch bei dauerhaft hohem NDR-Aufkommen durch eine fehlerhafte Forwarding-Konfiguration bleibt PRTG gelb und triggert nicht die 24/7-Bereitschaft. Roter Alarm kommt ausschließlich über `Real Failed %` (Warn 5%, Err 15%) und `Mail Loops` (Err 10).
+Der `Recipient-Not-Found`-Channel hat absichtlich **keine** Error-Schwelle. Auch bei dauerhaft hohem NDR-Aufkommen durch eine fehlerhafte Forwarding-Konfiguration bleibt PRTG gelb und triggert nicht die 24/7-Bereitschaft. Roter Alarm kommt ausschließlich über `Real Failed %` (Warn 5%, Err 15%) und `Mail Loops` (Err 10).
 
 ## Output-Formate
 
@@ -90,11 +90,6 @@ Der Recipient-Not-Found-Channel hat absichtlich **keine** Error-Schwelle. Auch b
 - PowerShell-Modul `ExchangeOnlineManagement` (mind. v3.5) — nur für Mail-Flow-Sensor und Folder-Sensor im Legacy-Modus
 - Lokale Admin-Rechte für die Provisionierung; im laufenden Betrieb genügt der PRTG-Probe-Service-Account
 
-## Klassifikation
-
-Vertraulich – Nur für internen Gebrauch (DATAGROUP SE).
-
 ---
 
-**Autor**: Jan Hübener · DATAGROUP SE · Server / Exchange Online Operations
-**Stand**: Mai 2026 · Version 1.0
+**Version**: 1.0 · Mai 2026
