@@ -483,12 +483,29 @@ if ($TestToken) {
     Write-Host ""
     Write-Step "Self-test (Graph token acquisition)" -Level Step
 
-    # Lazy-load the resolver from the main sensor if available alongside
+    # Snapshot helper params - even with Import-Module, defensively guard
+    # against any later refactor that re-introduces dot-source.
+    $savedTenantId = $TenantId
+    $savedClientId = $ClientId
+
     $resolverPath = Join-Path $PSScriptRoot 'Get-PRTGMailboxFolderHealth.ps1'
     if (Test-Path $resolverPath) {
-        . $resolverPath -NoAutoRun
+        # Import-Module instead of dot-source: the resolver script's own
+        # param() block declares $TenantId / $ClientId, and dot-sourcing would
+        # clobber the helper's variables with the resolver's defaults
+        # (= empty string). Module load runs in module scope and does not
+        # leak parameter variables into the calling scope.
+        $importedModule = $null
         try {
-            $cred = Resolve-SensorCredential -Config $cfg
+            $importedModule = Import-Module $resolverPath -Force `
+                                  -DisableNameChecking -PassThru `
+                                  -ErrorAction Stop
+
+            # Restore in case any earlier refactor still pollutes
+            $TenantId = $savedTenantId
+            $ClientId = $savedClientId
+
+            $cred  = Resolve-SensorCredential -Config $cfg
             $token = Get-GraphAccessToken -TenantId $TenantId -ClientId $ClientId `
                         -ClientSecret $cred.ClientSecret `
                         -CertificateThumbprint $cred.CertificateThumbprint
@@ -500,6 +517,11 @@ if ($TestToken) {
             Write-Step "Self-test FAILED: $($_.Exception.Message)" -Level Err
             if ($Method -like 'Cert*') {
                 Write-Step "Did you upload the .CER to the App Registration?" -Level Warn
+            }
+        }
+        finally {
+            if ($importedModule) {
+                Remove-Module $importedModule -Force -ErrorAction SilentlyContinue
             }
         }
     }
