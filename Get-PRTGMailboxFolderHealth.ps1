@@ -92,7 +92,7 @@
       -Config 'C:\PRTGSensorConfig\graph.json'
 
 .NOTES
-    Author : DATAGROUP - Jan Hubener
+    Author : Jan Hubener
     Repo   : PSScript / Get-PRTGMailboxFolderHealth
     PRTG   : EXE/Script Advanced (Json) or EXE/Script (KeyValue)
 #>
