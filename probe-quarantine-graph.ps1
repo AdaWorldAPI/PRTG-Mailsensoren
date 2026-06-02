@@ -11,13 +11,12 @@ param(
     [string]$TestMailbox = 'mirai.bsm@bsm.datagroup.de'
 )
 
-Import-Module 'C:\Program Files (x86)\PRTG Network Monitor\Custom Sensors\EXEXML\Get-PRTGMailboxFolderHealth.ps1' `
-    -Force -DisableNameChecking
+. 'C:\Program Files (x86)\PRTG Network Monitor\Custom Sensors\EXEXML\Get-PRTGMailboxFolderHealth.ps1' -NoAutoRun
 
 $cfg   = Get-Content $ConfigPath -Raw | ConvertFrom-Json
 $cred  = Resolve-SensorCredential -Config $cfg
 $token = Get-GraphAccessToken -TenantId $cfg.TenantId -ClientId $cfg.ClientId `
-                              -CertificateThumbprint $cred.Cert.Thumbprint
+                              -CertificateThumbprint $cred.CertificateThumbprint
 
 $hdrV1   = @{ Authorization = "Bearer $token"; 'Content-Type' = 'application/json' }
 $hdrBeta = @{ Authorization = "Bearer $token"; 'Content-Type' = 'application/json' }
