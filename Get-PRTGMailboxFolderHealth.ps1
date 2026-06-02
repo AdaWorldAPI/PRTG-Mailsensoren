@@ -1158,18 +1158,17 @@ function Format-PrtgJson {
             $e   = [int]$lim.Error
             $suppress = $false
         }
-        # Quarantine Kinds get their own thresholds (or get suppressed for reference channels)
+        # Quarantine Kinds:
+        #  QRecent (recent-window spike) is the ONLY alerting channel.
+        #  QTotal/QPhish/QMalware/QSpam are CUMULATIVE over the lookback
+        #  window, so they are volume/trend references - alerting on a
+        #  cumulative count would mean permanent red once the window has
+        #  any history. They stay reference-only unless the caller overrides
+        #  via -ChannelLimits.
         elseif ($c.Kind -eq 'QRecent') {
             $w = $WarningQuarantineRecent  ; $e = $ErrorQuarantineRecent  ; $suppress = $false
         }
-        elseif ($c.Kind -eq 'QPhish') {
-            $w = $WarningQuarantinePhish   ; $e = $ErrorQuarantinePhish   ; $suppress = $false
-        }
-        elseif ($c.Kind -eq 'QMalware') {
-            $w = $WarningQuarantineMalware ; $e = $ErrorQuarantineMalware ; $suppress = $false
-        }
-        elseif ($c.Kind -in 'QTotal','QSpam') {
-            # Reference-only channels - no alerting unless caller overrides via ChannelLimits
+        elseif ($c.Kind -in 'QTotal','QPhish','QMalware','QSpam') {
             $w = 0 ; $e = 0 ; $suppress = $true
         }
         elseif ($isAged -or $is1H) {
