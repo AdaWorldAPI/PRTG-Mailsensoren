@@ -97,9 +97,13 @@
     PRTG   : EXE/Script Advanced (Json) or EXE/Script (KeyValue)
 #>
 
-[CmdletBinding(DefaultParameterSetName = 'Graph')]
+[CmdletBinding()]
 param(
-    [Parameter(Position = 0)]
+    # Positional order matches the PRTG 5-placeholder layout so the Parameters
+    # field can be simply:  %scriptplaceholder1 %scriptplaceholder2 ... %scriptplaceholder5
+    #   pos 0 = TenantId, 1 = ClientId, 2 = CertificateThumbprint,
+    #   pos 3 = MailboxPreset (mailbox;preset), 4 = FolderList
+    # Named parameters keep working too.
     [string]$Mailbox,
 
     [string[]]$Folders = @('Inbox'),
@@ -112,6 +116,7 @@ param(
     # passes cleanly. If set, these OVERRIDE -Folders / -OneHourFolders.
     #   -FolderList  "Posteingang;Posteingang/VM Fehler;Posteingang/VM In Arbeit"
     #   -OneHourList "Posteingang;Posteingang/VM Fehler"
+    [Parameter(Position = 4)]
     [string]$FolderList,
 
     [string]$OneHourList,
@@ -135,6 +140,7 @@ param(
     # Missing/empty preset part falls back to 'folders'. Overrides -Mailbox/-Preset.
     #   robo.bsm@bsm.datagroup.de;kv-1h   -> Mailbox + Preset kv-1h
     #   robo.bsm@bsm.datagroup.de         -> Mailbox + Preset folders (fallback)
+    [Parameter(Position = 3)]
     [string]$MailboxPreset,
 
     [int]$ThresholdMinutes = 60,
@@ -143,20 +149,18 @@ param(
     [string]$Mode = 'Graph',
 
     # --- Graph auth -------------------------------------------------------
-    [Parameter(ParameterSetName = 'Graph')]
+    [Parameter(Position = 0)]
     [string]$TenantId,
 
-    [Parameter(ParameterSetName = 'Graph')]
+    [Parameter(Position = 1)]
     [string]$ClientId,
 
-    [Parameter(ParameterSetName = 'Graph')]
     [string]$ClientSecret,
 
-    [Parameter(ParameterSetName = 'Graph')]
+    [Parameter(Position = 2)]
     [string]$CertificateThumbprint,
 
     # --- Legacy auth (EXO + cert) ----------------------------------------
-    [Parameter(ParameterSetName = 'Legacy')]
     [string]$Organization,
 
     # --- Generic ----------------------------------------------------------
