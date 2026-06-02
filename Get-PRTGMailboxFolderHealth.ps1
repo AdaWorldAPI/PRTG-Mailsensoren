@@ -106,6 +106,16 @@ param(
 
     [string[]]$OneHourFolders = @(),
 
+    # PRTG-friendly alternatives: pass folders as a SINGLE delimited string
+    # (split on ; or |) instead of a comma-separated array. PRTG mangles
+    # comma/quote/whitespace in the Parameters field; one double-quoted string
+    # passes cleanly. If set, these OVERRIDE -Folders / -OneHourFolders.
+    #   -FolderList  "Posteingang;Posteingang/VM Fehler;Posteingang/VM In Arbeit"
+    #   -OneHourList "Posteingang;Posteingang/VM Fehler"
+    [string]$FolderList,
+
+    [string]$OneHourList,
+
     [int]$ThresholdMinutes = 60,
 
     [ValidateSet('Graph', 'Legacy')]
@@ -1302,6 +1312,24 @@ function Invoke-PRTGFolderSensor {
         elseif ($Bound[$k] -is [switch] -and $Bound[$k].IsPresent) {
             $effective[$k] = $true
         }
+    }
+
+    # PRTG-safe folder passing: a single delimited string avoids PRTG's
+    # comma/quote/whitespace parameter mangling. Split on ; or | into arrays.
+    # FolderList / OneHourList override Folders / OneHourFolders when present.
+    if ($effective.FolderList) {
+        $effective.Folders = @(
+            $effective.FolderList -split '[;|]' |
+                ForEach-Object { $_.Trim() } |
+                Where-Object { $_ }
+        )
+    }
+    if ($effective.OneHourList) {
+        $effective.OneHourFolders = @(
+            $effective.OneHourList -split '[;|]' |
+                ForEach-Object { $_.Trim() } |
+                Where-Object { $_ }
+        )
     }
 
     # 1b. Resolve credentials via the multi-source resolver IF the config carries
