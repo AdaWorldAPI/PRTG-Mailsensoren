@@ -215,6 +215,13 @@ param(
 # endpoints rejected since 2022. Idempotent OR-in.
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
+# stdout as UTF-8 WITHOUT BOM. Win PS 5.1 otherwise emits a BOM / OEM codepage
+# on stdout, which the console hides but PRTG's XML/JSON parser rejects (PE231/
+# PE233 "invalid JSON/XML"). Forcing a BOM-less UTF-8 console encoding makes the
+# bytes PRTG captures start cleanly at '{' / '['.
+try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch {}
+$OutputEncoding = New-Object System.Text.UTF8Encoding $false
+
 
 # =====================================================================
 #  Module-scope state (token cache, log buffer)
