@@ -147,6 +147,9 @@ param(
     #   New-ManagementRoleAssignment -Role 'Transport Hygiene' -App <sp-objectid>
     [switch]$IncludeQuarantine,
 
+    [ValidateSet('Graph','EXO')]
+    [string]$QuarantineSource = 'Graph',
+
     [int]$QuarantineLookbackDays = 30,
     [int]$QuarantineRecentMinutes = 60,
 
@@ -748,6 +751,71 @@ function Connect-LegacyEXO {
         -ErrorAction Stop | Out-Null
 }
 
+function Get-MailboxQuarantineCountsGraph {
+    <#
+    .SYNOPSIS
+        Returns quarantine counts via Graph Advanced Hunting (EmailEvents).
+
+    .DESCRIPTION
+        Single KQL query aggregates all buckets server-side. Pure REST, no
+        EXO module needed. Requires app permission ThreatHunting.Read.All.
+
+        Quarantine in EmailEvents = DeliveryLocation == 'Quarantine'
+        (NOT DeliveryAction - that is Delivered/Junked/Blocked/Replaced).
+
+        NOTE: Advanced Hunting has ~15-30 min ingestion latency, so the
+        Recent bucket can lag slightly behind real-time. The Total (lookback
+        window) is reliable. For real-time use -QuarantineSource EXO.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$Mailbox,
+        [Parameter(Mandatory)] [string]$Token,
+        [int]$LookbackDays   = 30,
+        [int]$RecentMinutes  = 60
+    )
+
+    # Escape single quotes in the mailbox address for KQL string literal
+    $mb = $Mailbox -replace "'", "''"
+
+    $kql = @"
+EmailEvents
+| where Timestamp > ago($([int]$LookbackDays)d)
+| where RecipientEmailAddress == '$mb'
+| where DeliveryLocation == 'Quarantine'
+| extend Bucket = case(
+    ThreatTypes has 'Phish', 'Phish',
+    ThreatTypes has 'Malware', 'Malware',
+    ThreatTypes has 'Spam', 'Spam',
+    'Other')
+| summarize Total=count(),
+            Recent=countif(Timestamp > ago($([int]$RecentMinutes)m)),
+            Phish=countif(Bucket == 'Phish'),
+            Malware=countif(Bucket == 'Malware'),
+            Spam=countif(Bucket == 'Spam')
+"@
+
+    $body = @{ Query = $kql } | ConvertTo-Json
+    $resp = Invoke-RestMethod -Method POST `
+                -Uri "https://graph.microsoft.com/v1.0/security/runHuntingQuery" `
+                -Headers @{ Authorization = "Bearer ${Token}"; 'Content-Type' = 'application/json' } `
+                -Body $body -ErrorAction Stop
+
+    $r = @($resp.results) | Select-Object -First 1
+    if (-not $r) {
+        # summarize with no matching rows still returns one row of zeros,
+        # but guard anyway
+        return [pscustomobject]@{ Total=0; Recent=0; Phish=0; Malware=0; Spam=0 }
+    }
+    return [pscustomobject]@{
+        Total   = [int]$r.Total
+        Recent  = [int]$r.Recent
+        Phish   = [int]$r.Phish
+        Malware = [int]$r.Malware
+        Spam    = [int]$r.Spam
+    }
+}
+
 function Get-MailboxQuarantineCounts {
     <#
     .SYNOPSIS
@@ -887,6 +955,8 @@ function Get-MailboxFolderHealth {
 
         # Quarantine (optional)
         [switch]$IncludeQuarantine,
+        [ValidateSet('Graph','EXO')]
+        [string]$QuarantineSource = 'Graph',
         [int]$QuarantineLookbackDays  = 30,
         [int]$QuarantineRecentMinutes = 60
     )
@@ -986,27 +1056,45 @@ function Get-MailboxFolderHealth {
     }
 
     # ---------------------------------------------------------------
-    #  Optional Quarantine block (Defender for Office 365 via EXO)
+    #  Optional Quarantine block (Defender for Office 365)
+    #  Two backends:
+    #    Graph (default) - Advanced Hunting EmailEvents, pure REST,
+    #                      needs app perm ThreatHunting.Read.All
+    #    EXO             - Get-QuarantineMessage, real-time, needs EXO
+    #                      module + RBAC role 'Transport Hygiene'
     # ---------------------------------------------------------------
     if ($IncludeQuarantine) {
         try {
-            # Need EXO connection - reuse if Mode=Legacy already established one
-            if (-not (Get-Module -ListAvailable -Name ExchangeOnlineManagement)) {
-                throw "ExchangeOnlineManagement module not installed - cannot query quarantine."
+            if ($QuarantineSource -eq 'Graph') {
+                # Reuse the Graph token already acquired above (Mode=Graph),
+                # otherwise acquire one now (Mode=Legacy path).
+                if (-not $token) {
+                    $token = Get-GraphAccessToken `
+                                -TenantId $TenantId -ClientId $ClientId `
+                                -ClientSecret $ClientSecret `
+                                -CertificateThumbprint $CertificateThumbprint
+                }
+                $q = Get-MailboxQuarantineCountsGraph -Mailbox $Mailbox -Token $token `
+                        -LookbackDays  $QuarantineLookbackDays `
+                        -RecentMinutes $QuarantineRecentMinutes
             }
-            if (-not $Organization) {
-                # derive tenant domain from mailbox or App Reg's primary domain
-                $domain = ($Mailbox -split '@')[-1]
-                Write-SensorLog "Organization not set; deriving '$domain' from mailbox for EXO connect." -Level Debug
-                $Organization = $domain
+            else {
+                # EXO backend
+                if (-not (Get-Module -ListAvailable -Name ExchangeOnlineManagement)) {
+                    throw "ExchangeOnlineManagement module not installed - cannot query quarantine via EXO."
+                }
+                if (-not $Organization) {
+                    $domain = ($Mailbox -split '@')[-1]
+                    Write-SensorLog "Organization not set; deriving '$domain' from mailbox for EXO connect." -Level Debug
+                    $Organization = $domain
+                }
+                Connect-LegacyEXO -ClientId $ClientId `
+                                  -CertificateThumbprint $CertificateThumbprint `
+                                  -Organization $Organization
+                $q = Get-MailboxQuarantineCounts -Mailbox $Mailbox `
+                        -LookbackDays  $QuarantineLookbackDays `
+                        -RecentMinutes $QuarantineRecentMinutes
             }
-            Connect-LegacyEXO -ClientId $ClientId `
-                              -CertificateThumbprint $CertificateThumbprint `
-                              -Organization $Organization
-
-            $q = Get-MailboxQuarantineCounts -Mailbox $Mailbox `
-                    -LookbackDays  $QuarantineLookbackDays `
-                    -RecentMinutes $QuarantineRecentMinutes
 
             $result.Channels.Add([pscustomobject]@{ Channel='Quarantine Total';   Kind='QTotal';   Folder='_quarantine'; Value=$q.Total   }) | Out-Null
             $result.Channels.Add([pscustomobject]@{ Channel='Quarantine Recent';  Kind='QRecent';  Folder='_quarantine'; Value=$q.Recent  }) | Out-Null
@@ -1015,11 +1103,15 @@ function Get-MailboxFolderHealth {
             $result.Channels.Add([pscustomobject]@{ Channel='Quarantine Spam';    Kind='QSpam';    Folder='_quarantine'; Value=$q.Spam    }) | Out-Null
         }
         catch {
-            $msg = "Quarantine query failed: $($_.Exception.Message)"
+            $msg = "Quarantine query ($QuarantineSource) failed: $($_.Exception.Message)"
             Write-SensorLog $msg -Level Error
             $result.Errors.Add($msg) | Out-Null
-            if ($_.Exception.Message -match 'role|permission|denied|unauthor') {
-                $result.Errors.Add("Hint: Service Principal needs RBAC role 'Transport Hygiene' in EXO. Run: Connect-ExchangeOnline; New-ManagementRoleAssignment -Role 'Transport Hygiene' -App <sp-objectid>") | Out-Null
+            if ($_.Exception.Message -match 'role|permission|denied|unauthor|forbidden') {
+                if ($QuarantineSource -eq 'Graph') {
+                    $result.Errors.Add("Hint: App needs permission 'ThreatHunting.Read.All' (admin-consented).") | Out-Null
+                } else {
+                    $result.Errors.Add("Hint: Service Principal needs RBAC role 'Transport Hygiene'. Run: Connect-ExchangeOnline; New-ManagementRoleAssignment -Role 'Transport Hygiene' -App <sp-objectid>") | Out-Null
+                }
             }
         }
     }
@@ -1235,7 +1327,7 @@ function Invoke-PRTGFolderSensor {
     # 2. Build splat for Get-MailboxFolderHealth
     $passKeys = @('Mailbox','Folders','OneHourFolders','ThresholdMinutes','Mode',
                   'TenantId','ClientId','ClientSecret','CertificateThumbprint','Organization',
-                  'IncludeQuarantine','QuarantineLookbackDays','QuarantineRecentMinutes')
+                  'IncludeQuarantine','QuarantineSource','QuarantineLookbackDays','QuarantineRecentMinutes')
     $splat = @{}
     foreach ($k in $passKeys) {
         if ($effective.ContainsKey($k) -and $null -ne $effective[$k] -and "$($effective[$k])" -ne '') {
