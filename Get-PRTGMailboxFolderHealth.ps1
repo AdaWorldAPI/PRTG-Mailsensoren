@@ -118,9 +118,14 @@ param(
 
     # Profile switch (PRTG placeholder-friendly): one keyword selects the channel
     # set, so the sensor needs no array/flag juggling in the Parameters field.
-    #   folders     - Total + 1H only (1H auto = all folders except 'VM Manuell')
-    #   quarantine  - folders + Defender for O365 quarantine channels
-    #   full        - quarantine + the Junk-E-Mail folder as an extra Total channel
+    #   JSON / Advanced (multi-channel):
+    #     folders       - Total + 1H only (1H auto = all folders except 'VM Manuell')
+    #     quarantine    - folders + Defender for O365 quarantine channels
+    #     full          - quarantine + the Junk-E-Mail folder as an extra Total channel
+    #   KeyValue / legacy (single channel; FolderList = ONE folder):
+    #     kv-total      - that folder's Total
+    #     kv-1h         - that folder's 1H (aging)
+    #     kv-quarantine - Quarantine Recent (spike / lost-input)
     # 1H is auto-derived from the folder list unless -OneHourList/-OneHourFolders
     # is given explicitly. Empty/unknown value falls back to 'folders'.
     [string]$Preset,
@@ -1341,10 +1346,16 @@ function Invoke-PRTGFolderSensor {
         )
     }
 
-    # Profile switch: one keyword expands into folders / 1H / quarantine / junk.
-    #   folders    -> Total + 1H only
-    #   quarantine -> + Defender quarantine channels
-    #   full       -> + Junk-E-Mail folder (Total only)
+    # Profile switch: one keyword expands into folders / 1H / quarantine / junk,
+    # or selects a single-channel KeyValue (legacy) output.
+    #   JSON / Advanced (multi-channel):
+    #     folders       -> Total + 1H only
+    #     quarantine    -> + Defender quarantine channels
+    #     full          -> + Junk-E-Mail folder (Total only)
+    #   KeyValue / legacy (single channel; FolderList = ONE folder):
+    #     kv-total      -> that folder's Total
+    #     kv-1h         -> that folder's 1H (aging)
+    #     kv-quarantine -> Quarantine Recent (spike / lost-input)
     # 1H is auto-derived (all folders except the manual queue) unless an explicit
     # OneHourList/OneHourFolders was supplied. Unknown/empty -> 'folders'.
     if ($effective.Preset) {
@@ -1359,6 +1370,7 @@ function Invoke-PRTGFolderSensor {
         }
 
         switch ($preset) {
+            # ---- JSON / Advanced (multi-channel) ----
             'quarantine' { $effective.IncludeQuarantine = $true }
             'full' {
                 $effective.IncludeQuarantine = $true
@@ -1366,6 +1378,30 @@ function Invoke-PRTGFolderSensor {
                     $effective.Folders = @($effective.Folders) + 'Junk-E-Mail'
                 }
             }
+
+            # ---- KeyValue / legacy (single channel) ----
+            # FolderList carries ONE folder; force KeyValue output and pick the
+            # channel via the existing -KeyValueChannel selector.
+            'kv-total' {
+                $effective.OutputFormat    = 'KeyValue'
+                $effective.KeyValueChannel = 'Total'
+                $effective.OneHourFolders  = @()          # single Total channel only
+            }
+            'kv-1h' {
+                $effective.OutputFormat    = 'KeyValue'
+                $effective.KeyValueChannel = 'Aged'
+                # ensure the one folder also yields a 1H channel
+                if (-not $haveExplicit1H -and $effective.Folders) {
+                    $effective.OneHourFolders = @($effective.Folders)
+                }
+            }
+            'kv-quarantine' {
+                $effective.OutputFormat    = 'KeyValue'
+                $effective.KeyValueChannel = 'QRecent'
+                $effective.IncludeQuarantine = $true
+                $effective.OneHourFolders  = @()          # quarantine spike only
+            }
+
             default { }   # 'folders' (or anything unrecognized) -> folders only
         }
     }
