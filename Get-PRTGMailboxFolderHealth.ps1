@@ -166,7 +166,7 @@ param(
     # --- Generic ----------------------------------------------------------
     [string]$Config,
 
-    [ValidateSet('Json', 'KeyValue')]
+    [ValidateSet('Json', 'KeyValue', 'Xml')]
     [string]$OutputFormat = 'Json',
 
     # In KeyValue mode, which single channel becomes the value:
@@ -1271,6 +1271,113 @@ function Format-PrtgJson {
     return ($obj | ConvertTo-Json -Depth 6 -Compress:$false)
 }
 
+function Format-PrtgXml {
+    # Mirrors Format-PrtgJson exactly, but emits the native PRTG <prtg>...</prtg>
+    # XML via an XmlWriter (proper escaping, no manual string concat). No <?xml?>
+    # declaration and no BOM - both are PRTG parser stumbling blocks.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] $Health,
+        [int]$WarningCount    = 25,
+        [int]$ErrorCount      = 100,
+        [int]$WarningCount1H  = 1,
+        [int]$ErrorCount1H    = 5,
+        [int]$WarningQuarantineRecent  = 5,
+        [int]$ErrorQuarantineRecent    = 20,
+        [int]$WarningQuarantinePhish   = 1,
+        [int]$ErrorQuarantinePhish     = 5,
+        [int]$WarningQuarantineMalware = 1,
+        [int]$ErrorQuarantineMalware   = 3,
+        [hashtable]$ChannelLimits = @{}
+    )
+
+    $sw = New-Object System.IO.StringWriter
+    $st = New-Object System.Xml.XmlWriterSettings
+    $st.OmitXmlDeclaration = $true          # PRTG wants <prtg> directly, no <?xml?>
+    $st.Indent             = $true
+    $st.Encoding           = New-Object System.Text.UTF8Encoding $false
+    $xw = [System.Xml.XmlWriter]::Create($sw, $st)
+
+    $xw.WriteStartElement('prtg')
+
+    foreach ($c in $Health.Channels) {
+        $isAged = ($c.Kind -eq 'Aged')
+        $is1H   = ($c.Channel -like '* 1H')
+
+        if ($ChannelLimits.ContainsKey($c.Channel)) {
+            $lim = $ChannelLimits[$c.Channel]
+            $w = [int]$lim.Warning ; $e = [int]$lim.Error ; $suppress = $false
+        }
+        elseif ($c.Kind -eq 'QRecent') {
+            $w = $WarningQuarantineRecent ; $e = $ErrorQuarantineRecent ; $suppress = $false
+        }
+        elseif ($c.Kind -in 'QTotal','QPhish','QMalware','QSpam') {
+            $w = 0 ; $e = 0 ; $suppress = $true
+        }
+        elseif ($isAged -or $is1H) {
+            $w = $WarningCount1H ; $e = $ErrorCount1H ; $suppress = $false
+        }
+        else {
+            $w = $WarningCount ; $e = $ErrorCount ; $suppress = $false
+        }
+
+        $limitmode = if ($suppress) { 0 } else { 1 }
+        $wOut = $w ; $eOut = $e
+
+        # -1 = not supported by this flavour -> force error limit
+        if ($c.Value -lt 0) { $limitmode = 1 ; $wOut = 0 ; $eOut = 0 ; $suppress = $false }
+
+        $xw.WriteStartElement('result')
+        $xw.WriteElementString('channel',    [string]$c.Channel)
+        $xw.WriteElementString('value',      [string][int]$c.Value)
+        $xw.WriteElementString('unit',       'Custom')
+        $xw.WriteElementString('customunit', '#')
+        $xw.WriteElementString('float',      '0')
+        $xw.WriteElementString('limitmode',  [string]$limitmode)
+        if ($limitmode -eq 1) {
+            $xw.WriteElementString('limitmaxwarning', [string]$wOut)
+            $xw.WriteElementString('limitmaxerror',   [string]$eOut)
+        }
+        $xw.WriteEndElement()   # result
+    }
+
+    $text = if ($Health.Errors.Count) {
+        "Errors: " + ($Health.Errors -join ' | ')
+    } else {
+        "OK - $($Health.Channels.Count) channels - $($Health.Mode)"
+    }
+    if ($Health.Errors.Count -and $Health.Channels.Count -eq 0) {
+        $xw.WriteElementString('error', '1')
+    }
+    $xw.WriteElementString('text', $text)
+
+    $xw.WriteEndElement()       # prtg
+    $xw.Flush(); $xw.Close()
+    return $sw.ToString()
+}
+
+function Get-PrtgErrorEnvelope {
+    # Single place that emits an error in the right flavour for the sensor type.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Message, [string]$Format = 'Json')
+    switch ($Format) {
+        'KeyValue' { return "-1:$Message" }
+        'Xml' {
+            $sw = New-Object System.IO.StringWriter
+            $st = New-Object System.Xml.XmlWriterSettings
+            $st.OmitXmlDeclaration = $true ; $st.Indent = $true
+            $xw = [System.Xml.XmlWriter]::Create($sw, $st)
+            $xw.WriteStartElement('prtg')
+            $xw.WriteElementString('error', '1')
+            $xw.WriteElementString('text',  $Message)
+            $xw.WriteEndElement()
+            $xw.Flush(); $xw.Close()
+            return $sw.ToString()
+        }
+        default { return (@{ prtg = @{ error = 1; text = $Message } } | ConvertTo-Json -Depth 4) }
+    }
+}
+
 function Format-PrtgKeyValue {
     [CmdletBinding()]
     param(
@@ -1405,13 +1512,19 @@ function Invoke-PRTGFolderSensor {
         }
 
         switch ($preset) {
-            # ---- JSON / Advanced (multi-channel) ----
-            'quarantine' { $effective.IncludeQuarantine = $true }
+            # ---- XML / Advanced (multi-channel) ----
+            # This PRTG build rejects JSON from EXE/Script Advanced sensors, so the
+            # presets emit native PRTG XML instead.
+            'quarantine' {
+                $effective.IncludeQuarantine = $true
+                $effective.OutputFormat = 'Xml'
+            }
             'full' {
                 $effective.IncludeQuarantine = $true
                 if (@($effective.Folders) -notcontains 'Junk-E-Mail') {
                     $effective.Folders = @($effective.Folders) + 'Junk-E-Mail'
                 }
+                $effective.OutputFormat = 'Xml'
             }
 
             # ---- KeyValue / legacy (single channel) ----
@@ -1437,7 +1550,7 @@ function Invoke-PRTGFolderSensor {
                 $effective.OneHourFolders  = @()          # quarantine spike only
             }
 
-            default { }   # 'folders' (or anything unrecognized) -> folders only
+            default { $effective.OutputFormat = 'Xml' }   # 'folders'/unknown -> XML multi-channel
         }
     }
 
@@ -1461,11 +1574,7 @@ function Invoke-PRTGFolderSensor {
             catch {
                 $err = "Credential resolution failed: $($_.Exception.Message)"
                 Write-SensorLog $err -Level Error
-                if ($effective.OutputFormat -eq 'KeyValue') { Write-Output "-1:${err}" }
-                else {
-                    $j = @{ prtg = @{ error = 1; text = $err } } | ConvertTo-Json -Depth 4
-                    Write-Output $j
-                }
+                Write-Output (Get-PrtgErrorEnvelope -Message $err -Format $effective.OutputFormat)
                 return
             }
         }
@@ -1473,11 +1582,7 @@ function Invoke-PRTGFolderSensor {
 
     if (-not $effective.Mailbox) {
         $err = "Mailbox parameter is required."
-        if ($effective.OutputFormat -eq 'KeyValue') { Write-Output "-1:${err}" }
-        else {
-            $j = @{ prtg = @{ error = 1; text = $err } } | ConvertTo-Json -Depth 4
-            Write-Output $j
-        }
+        Write-Output (Get-PrtgErrorEnvelope -Message $err -Format $effective.OutputFormat)
         return
     }
 
@@ -1498,11 +1603,7 @@ function Invoke-PRTGFolderSensor {
     catch {
         $err = $_.Exception.Message
         Write-SensorLog $err -Level Error
-        if ($effective.OutputFormat -eq 'KeyValue') { Write-Output "-1:${err}" }
-        else {
-            $j = @{ prtg = @{ error = 1; text = $err } } | ConvertTo-Json -Depth 4
-            Write-Output $j
-        }
+        Write-Output (Get-PrtgErrorEnvelope -Message $err -Format $effective.OutputFormat)
         return
     }
 
@@ -1528,7 +1629,12 @@ function Invoke-PRTGFolderSensor {
             ErrorQuarantineMalware   = if ($effective.ErrorQuarantineMalware)   { [int]$effective.ErrorQuarantineMalware }   else { 3 }
             ChannelLimits    = if ($effective.ChannelLimits)   { $effective.ChannelLimits }        else { @{} }
         }
-        Write-Output (Format-PrtgJson @fmtParams)
+        if ($effective.OutputFormat -eq 'Xml') {
+            Write-Output (Format-PrtgXml @fmtParams)
+        }
+        else {
+            Write-Output (Format-PrtgJson @fmtParams)
+        }
     }
 }
 
