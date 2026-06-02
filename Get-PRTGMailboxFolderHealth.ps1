@@ -141,6 +141,26 @@ param(
 
     [hashtable]$ChannelLimits = @{},
 
+    # --- Quarantine (Defender for Office 365) ---------------------------
+    # Requires EXO RBAC role 'Transport Hygiene' assigned to the Service
+    # Principal (one-time):
+    #   New-ManagementRoleAssignment -Role 'Transport Hygiene' -App <sp-objectid>
+    [switch]$IncludeQuarantine,
+
+    [int]$QuarantineLookbackDays = 30,
+    [int]$QuarantineRecentMinutes = 60,
+
+    # Default thresholds tuned for security alerts:
+    #  - Recent surge -> moderate alert (phishing campaign signal)
+    #  - Any Phish / Malware -> sharp alert
+    #  - Total / Spam      -> reference only, no thresholds
+    [int]$WarningQuarantineRecent  = 5,
+    [int]$ErrorQuarantineRecent    = 20,
+    [int]$WarningQuarantinePhish   = 1,
+    [int]$ErrorQuarantinePhish     = 5,
+    [int]$WarningQuarantineMalware = 1,
+    [int]$ErrorQuarantineMalware   = 3,
+
     [switch]$AsObject,             # return PSObject instead of writing to stdout
     [switch]$NoAutoRun             # for explicit "load only" via direct invoke
 )
@@ -728,6 +748,82 @@ function Connect-LegacyEXO {
         -ErrorAction Stop | Out-Null
 }
 
+function Get-MailboxQuarantineCounts {
+    <#
+    .SYNOPSIS
+        Returns quarantine counts for a specific recipient mailbox.
+
+    .DESCRIPTION
+        Uses EXO PowerShell Get-QuarantineMessage with app-only cert auth.
+        Caller must have Connect-LegacyEXO'd first.
+
+        Returns five buckets:
+          Total       - all quarantined messages in lookback window
+          Recent      - messages received in last $RecentMinutes
+          Phish       - Type in 'Phish','HighConfPhish','SpoofIntra'
+          Malware     - Type eq 'Malware'
+          Spam        - Type in 'Spam','HighConfSpam','Bulk'
+
+    .NOTES
+        Required RBAC role on the SP: 'Transport Hygiene'.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string]$Mailbox,
+        [int]$LookbackDays   = 30,
+        [int]$RecentMinutes  = 60
+    )
+
+    if (-not (Get-Command Get-QuarantineMessage -ErrorAction SilentlyContinue)) {
+        throw "Get-QuarantineMessage not available - EXO module not loaded or RBAC role missing."
+    }
+
+    $end   = Get-Date
+    $start = $end.AddDays(-[Math]::Max(1, $LookbackDays))
+
+    # Get-QuarantineMessage pagination - PageSize 1000 max, iterate Page
+    $all  = New-Object System.Collections.Generic.List[object]
+    $page = 1
+    do {
+        $batch = Get-QuarantineMessage `
+                    -RecipientAddress $Mailbox `
+                    -StartReceivedDate $start `
+                    -EndReceivedDate   $end `
+                    -PageSize 1000 -Page $page `
+                    -ErrorAction Stop
+        if (-not $batch) { break }
+        $bc = ($batch | Measure-Object).Count
+        foreach ($m in $batch) { $all.Add($m) | Out-Null }
+        if ($bc -lt 1000) { break }
+        $page++
+        # safety: cap at 10 pages = 10k messages (would indicate misconfigured threshold)
+        if ($page -gt 10) {
+            Write-SensorLog "Quarantine query for $Mailbox capped at 10k messages." -Level Warn
+            break
+        }
+    } while ($true)
+
+    $recentCutoff = $end.AddMinutes(-[Math]::Abs($RecentMinutes))
+
+    # Type field values from Get-QuarantineMessage:
+    #   Spam, HighConfSpam, Phish, HighConfPhish, Bulk, Malware,
+    #   SpoofIntra, TransportRule, UnAuth, Mass, FileTypeBlock
+    $phishTypes   = @('Phish','HighConfPhish','SpoofIntra')
+    $malwareTypes = @('Malware','FileTypeBlock')
+    $spamTypes    = @('Spam','HighConfSpam','Bulk','Mass')
+
+    return [pscustomobject]@{
+        Total       = $all.Count
+        Recent      = @($all | Where-Object { $_.ReceivedTime -ge $recentCutoff }).Count
+        Phish       = @($all | Where-Object { $_.Type -in $phishTypes }).Count
+        Malware     = @($all | Where-Object { $_.Type -in $malwareTypes }).Count
+        Spam        = @($all | Where-Object { $_.Type -in $spamTypes }).Count
+        WindowStart = $start.ToString('o')
+        WindowEnd   = $end.ToString('o')
+    }
+}
+
+
 function Get-FolderStatsLegacy {
     [CmdletBinding()]
     param(
@@ -787,7 +883,12 @@ function Get-MailboxFolderHealth {
         [string]$ClientId,
         [string]$ClientSecret,
         [string]$CertificateThumbprint,
-        [string]$Organization
+        [string]$Organization,
+
+        # Quarantine (optional)
+        [switch]$IncludeQuarantine,
+        [int]$QuarantineLookbackDays  = 30,
+        [int]$QuarantineRecentMinutes = 60
     )
 
     $result = [ordered]@{
@@ -884,6 +985,45 @@ function Get-MailboxFolderHealth {
         }
     }
 
+    # ---------------------------------------------------------------
+    #  Optional Quarantine block (Defender for Office 365 via EXO)
+    # ---------------------------------------------------------------
+    if ($IncludeQuarantine) {
+        try {
+            # Need EXO connection - reuse if Mode=Legacy already established one
+            if (-not (Get-Module -ListAvailable -Name ExchangeOnlineManagement)) {
+                throw "ExchangeOnlineManagement module not installed - cannot query quarantine."
+            }
+            if (-not $Organization) {
+                # derive tenant domain from mailbox or App Reg's primary domain
+                $domain = ($Mailbox -split '@')[-1]
+                Write-SensorLog "Organization not set; deriving '$domain' from mailbox for EXO connect." -Level Debug
+                $Organization = $domain
+            }
+            Connect-LegacyEXO -ClientId $ClientId `
+                              -CertificateThumbprint $CertificateThumbprint `
+                              -Organization $Organization
+
+            $q = Get-MailboxQuarantineCounts -Mailbox $Mailbox `
+                    -LookbackDays  $QuarantineLookbackDays `
+                    -RecentMinutes $QuarantineRecentMinutes
+
+            $result.Channels.Add([pscustomobject]@{ Channel='Quarantine Total';   Kind='QTotal';   Folder='_quarantine'; Value=$q.Total   }) | Out-Null
+            $result.Channels.Add([pscustomobject]@{ Channel='Quarantine Recent';  Kind='QRecent';  Folder='_quarantine'; Value=$q.Recent  }) | Out-Null
+            $result.Channels.Add([pscustomobject]@{ Channel='Quarantine Phish';   Kind='QPhish';   Folder='_quarantine'; Value=$q.Phish   }) | Out-Null
+            $result.Channels.Add([pscustomobject]@{ Channel='Quarantine Malware'; Kind='QMalware'; Folder='_quarantine'; Value=$q.Malware }) | Out-Null
+            $result.Channels.Add([pscustomobject]@{ Channel='Quarantine Spam';    Kind='QSpam';    Folder='_quarantine'; Value=$q.Spam    }) | Out-Null
+        }
+        catch {
+            $msg = "Quarantine query failed: $($_.Exception.Message)"
+            Write-SensorLog $msg -Level Error
+            $result.Errors.Add($msg) | Out-Null
+            if ($_.Exception.Message -match 'role|permission|denied|unauthor') {
+                $result.Errors.Add("Hint: Service Principal needs RBAC role 'Transport Hygiene' in EXO. Run: Connect-ExchangeOnline; New-ManagementRoleAssignment -Role 'Transport Hygiene' -App <sp-objectid>") | Out-Null
+            }
+        }
+    }
+
     return [pscustomobject]$result
 }
 
@@ -900,6 +1040,15 @@ function Format-PrtgJson {
         [int]$ErrorCount      = 100,
         [int]$WarningCount1H  = 1,
         [int]$ErrorCount1H    = 5,
+
+        # Quarantine thresholds
+        [int]$WarningQuarantineRecent  = 5,
+        [int]$ErrorQuarantineRecent    = 20,
+        [int]$WarningQuarantinePhish   = 1,
+        [int]$ErrorQuarantinePhish     = 5,
+        [int]$WarningQuarantineMalware = 1,
+        [int]$ErrorQuarantineMalware   = 3,
+
         [hashtable]$ChannelLimits = @{}
     )
 
@@ -915,12 +1064,27 @@ function Format-PrtgJson {
             $lim = $ChannelLimits[$c.Channel]
             $w   = [int]$lim.Warning
             $e   = [int]$lim.Error
+            $suppress = $false
+        }
+        # Quarantine Kinds get their own thresholds (or get suppressed for reference channels)
+        elseif ($c.Kind -eq 'QRecent') {
+            $w = $WarningQuarantineRecent  ; $e = $ErrorQuarantineRecent  ; $suppress = $false
+        }
+        elseif ($c.Kind -eq 'QPhish') {
+            $w = $WarningQuarantinePhish   ; $e = $ErrorQuarantinePhish   ; $suppress = $false
+        }
+        elseif ($c.Kind -eq 'QMalware') {
+            $w = $WarningQuarantineMalware ; $e = $ErrorQuarantineMalware ; $suppress = $false
+        }
+        elseif ($c.Kind -in 'QTotal','QSpam') {
+            # Reference-only channels - no alerting unless caller overrides via ChannelLimits
+            $w = 0 ; $e = 0 ; $suppress = $true
         }
         elseif ($isAged -or $is1H) {
-            $w = $WarningCount1H ; $e = $ErrorCount1H
+            $w = $WarningCount1H ; $e = $ErrorCount1H ; $suppress = $false
         }
         else {
-            $w = $WarningCount   ; $e = $ErrorCount
+            $w = $WarningCount   ; $e = $ErrorCount   ; $suppress = $false
         }
 
         $channelObj = [ordered]@{
@@ -929,9 +1093,11 @@ function Format-PrtgJson {
             unit          = 'Custom'
             customunit    = '#'
             float         = 0
-            limitmode     = 1
-            limitmaxwarning = $w
-            limitmaxerror   = $e
+            limitmode     = if ($suppress) { 0 } else { 1 }
+        }
+        if (-not $suppress) {
+            $channelObj.limitmaxwarning = $w
+            $channelObj.limitmaxerror   = $e
         }
 
         # -1 = "not supported by this flavour" -> downgrade to error/skip
@@ -1068,7 +1234,8 @@ function Invoke-PRTGFolderSensor {
 
     # 2. Build splat for Get-MailboxFolderHealth
     $passKeys = @('Mailbox','Folders','OneHourFolders','ThresholdMinutes','Mode',
-                  'TenantId','ClientId','ClientSecret','CertificateThumbprint','Organization')
+                  'TenantId','ClientId','ClientSecret','CertificateThumbprint','Organization',
+                  'IncludeQuarantine','QuarantineLookbackDays','QuarantineRecentMinutes')
     $splat = @{}
     foreach ($k in $passKeys) {
         if ($effective.ContainsKey($k) -and $null -ne $effective[$k] -and "$($effective[$k])" -ne '') {
@@ -1103,6 +1270,12 @@ function Invoke-PRTGFolderSensor {
             ErrorCount       = if ($effective.ErrorCount)      { [int]$effective.ErrorCount }      else { 100 }
             WarningCount1H   = if ($effective.WarningCount1H)  { [int]$effective.WarningCount1H }  else { 1 }
             ErrorCount1H     = if ($effective.ErrorCount1H)    { [int]$effective.ErrorCount1H }    else { 5 }
+            WarningQuarantineRecent  = if ($effective.WarningQuarantineRecent)  { [int]$effective.WarningQuarantineRecent }  else { 5 }
+            ErrorQuarantineRecent    = if ($effective.ErrorQuarantineRecent)    { [int]$effective.ErrorQuarantineRecent }    else { 20 }
+            WarningQuarantinePhish   = if ($effective.WarningQuarantinePhish)   { [int]$effective.WarningQuarantinePhish }   else { 1 }
+            ErrorQuarantinePhish     = if ($effective.ErrorQuarantinePhish)     { [int]$effective.ErrorQuarantinePhish }     else { 5 }
+            WarningQuarantineMalware = if ($effective.WarningQuarantineMalware) { [int]$effective.WarningQuarantineMalware } else { 1 }
+            ErrorQuarantineMalware   = if ($effective.ErrorQuarantineMalware)   { [int]$effective.ErrorQuarantineMalware }   else { 3 }
             ChannelLimits    = if ($effective.ChannelLimits)   { $effective.ChannelLimits }        else { @{} }
         }
         Write-Output (Format-PrtgJson @fmtParams)
