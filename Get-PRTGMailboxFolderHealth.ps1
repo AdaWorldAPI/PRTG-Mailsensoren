@@ -134,6 +134,14 @@ param(
     [ValidateSet('Json', 'KeyValue')]
     [string]$OutputFormat = 'Json',
 
+    # In KeyValue mode, which single channel becomes the value:
+    #   Auto    - first existing in precedence: Aged(1H) -> QRecent -> Total -> QTotal
+    #   Total   - first folder Total
+    #   Aged    - first folder 1H (aged) channel
+    #   QTotal / QRecent / QPhish / QMalware / QSpam - that quarantine channel
+    [ValidateSet('Auto','Total','Aged','QTotal','QRecent','QPhish','QMalware','QSpam')]
+    [string]$KeyValueChannel = 'Auto',
+
     [int]$WarningCount    = 25,
     [int]$ErrorCount      = 100,
     [int]$WarningCount1H  = 1,
@@ -1223,29 +1231,42 @@ function Format-PrtgJson {
 
 function Format-PrtgKeyValue {
     [CmdletBinding()]
-    param([Parameter(Mandatory)] $Health)
+    param(
+        [Parameter(Mandatory)] $Health,
+        [ValidateSet('Auto','Total','Aged','QTotal','QRecent','QPhish','QMalware','QSpam')]
+        [string]$Select = 'Auto'
+    )
 
     if ($Health.Errors.Count -and $Health.Channels.Count -eq 0) {
         return "-1:$($Health.Errors -join ' | ')"
     }
 
-    # Intent: if -OneHourFolders was used, the Aged (1H) value is what the
-    # caller cares about - prefer it. Else fall back to the first Total.
-    $first = $Health.Channels |
-             Where-Object { $_.Kind -eq 'Aged' } |
-             Select-Object -First 1
-    if (-not $first) {
-        $first = $Health.Channels |
-                 Where-Object { $_.Kind -eq 'Total' } |
-                 Select-Object -First 1
-    }
-    if (-not $first) { return "-1:no channel produced" }
+    $pick = $null
 
-    $msg = "$($first.Channel)=$($first.Value)"
-    if ($Health.Errors.Count) {
-        $msg += " (warn: $($Health.Errors.Count) folder error(s))"
+    if ($Select -ne 'Auto') {
+        # Explicit: find the channel whose Kind matches the selector
+        $pick = $Health.Channels | Where-Object { $_.Kind -eq $Select } | Select-Object -First 1
+        if (-not $pick) {
+            return "-1:KeyValueChannel '$Select' not present (channel not produced - check -IncludeQuarantine / -OneHourFolders)"
+        }
     }
-    return "$($first.Value):${msg}"
+    else {
+        # Auto precedence: the most specific intentional signal wins.
+        #   Aged (1H folder stuck-detection) -> QRecent (quarantine spike)
+        #   -> Total (folder volume) -> QTotal (quarantine volume)
+        foreach ($kind in 'Aged','QRecent','Total','QTotal') {
+            $pick = $Health.Channels | Where-Object { $_.Kind -eq $kind } | Select-Object -First 1
+            if ($pick) { break }
+        }
+    }
+
+    if (-not $pick) { return "-1:no channel produced" }
+
+    $msg = "$($pick.Channel)=$($pick.Value)"
+    if ($Health.Errors.Count) {
+        $msg += " (warn: $($Health.Errors.Count) error(s))"
+    }
+    return "$($pick.Value):${msg}"
 }
 
 
@@ -1352,7 +1373,8 @@ function Invoke-PRTGFolderSensor {
 
     # 3. Format
     if ($effective.OutputFormat -eq 'KeyValue') {
-        Write-Output (Format-PrtgKeyValue -Health $health)
+        $kvSel = if ($effective.KeyValueChannel) { $effective.KeyValueChannel } else { 'Auto' }
+        Write-Output (Format-PrtgKeyValue -Health $health -Select $kvSel)
     }
     else {
         $fmtParams = @{
