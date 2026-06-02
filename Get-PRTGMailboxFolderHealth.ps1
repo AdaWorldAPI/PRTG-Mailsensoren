@@ -116,6 +116,15 @@ param(
 
     [string]$OneHourList,
 
+    # Profile switch (PRTG placeholder-friendly): one keyword selects the channel
+    # set, so the sensor needs no array/flag juggling in the Parameters field.
+    #   folders     - Total + 1H only (1H auto = all folders except 'VM Manuell')
+    #   quarantine  - folders + Defender for O365 quarantine channels
+    #   full        - quarantine + the Junk-E-Mail folder as an extra Total channel
+    # 1H is auto-derived from the folder list unless -OneHourList/-OneHourFolders
+    # is given explicitly. Empty/unknown value falls back to 'folders'.
+    [string]$Preset,
+
     [int]$ThresholdMinutes = 60,
 
     [ValidateSet('Graph', 'Legacy')]
@@ -1330,6 +1339,35 @@ function Invoke-PRTGFolderSensor {
                 ForEach-Object { $_.Trim() } |
                 Where-Object { $_ }
         )
+    }
+
+    # Profile switch: one keyword expands into folders / 1H / quarantine / junk.
+    #   folders    -> Total + 1H only
+    #   quarantine -> + Defender quarantine channels
+    #   full       -> + Junk-E-Mail folder (Total only)
+    # 1H is auto-derived (all folders except the manual queue) unless an explicit
+    # OneHourList/OneHourFolders was supplied. Unknown/empty -> 'folders'.
+    if ($effective.Preset) {
+        $preset = ([string]$effective.Preset).Trim().ToLower()
+
+        # Auto-derive 1H from the folder list (skip 'VM Manuell') if not explicit.
+        $haveExplicit1H = ($effective.OneHourFolders -and @($effective.OneHourFolders).Count -gt 0)
+        if (-not $haveExplicit1H -and $effective.Folders) {
+            $effective.OneHourFolders = @(
+                $effective.Folders | Where-Object { $_ -notmatch 'VM\s*Manuell' }
+            )
+        }
+
+        switch ($preset) {
+            'quarantine' { $effective.IncludeQuarantine = $true }
+            'full' {
+                $effective.IncludeQuarantine = $true
+                if (@($effective.Folders) -notcontains 'Junk-E-Mail') {
+                    $effective.Folders = @($effective.Folders) + 'Junk-E-Mail'
+                }
+            }
+            default { }   # 'folders' (or anything unrecognized) -> folders only
+        }
     }
 
     # 1b. Resolve credentials via the multi-source resolver IF the config carries
