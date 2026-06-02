@@ -130,6 +130,13 @@ param(
     # is given explicitly. Empty/unknown value falls back to 'folders'.
     [string]$Preset,
 
+    # PRTG 5-placeholder squeeze: carries "mailbox;preset" in a single field so
+    # mailbox and profile fit one placeholder. Split on the FIRST ';' only.
+    # Missing/empty preset part falls back to 'folders'. Overrides -Mailbox/-Preset.
+    #   robo.bsm@bsm.datagroup.de;kv-1h   -> Mailbox + Preset kv-1h
+    #   robo.bsm@bsm.datagroup.de         -> Mailbox + Preset folders (fallback)
+    [string]$MailboxPreset,
+
     [int]$ThresholdMinutes = 60,
 
     [ValidateSet('Graph', 'Legacy')]
@@ -1325,6 +1332,23 @@ function Invoke-PRTGFolderSensor {
         }
         elseif ($Bound[$k] -is [switch] -and $Bound[$k].IsPresent) {
             $effective[$k] = $true
+        }
+    }
+
+    # PRTG 5-placeholder squeeze: "mailbox;preset" in one field. Split on the
+    # FIRST ';' only (mailboxes never contain ';'; presets are single tokens).
+    # Sets Mailbox + Preset; missing preset part falls back to 'folders'.
+    if ($effective.MailboxPreset) {
+        $mp = [string]$effective.MailboxPreset
+        $idx = $mp.IndexOf(';')
+        if ($idx -ge 0) {
+            $effective.Mailbox = $mp.Substring(0, $idx).Trim()
+            $presetPart = $mp.Substring($idx + 1).Trim()
+            $effective.Preset = if ($presetPart) { $presetPart } else { 'folders' }
+        }
+        else {
+            $effective.Mailbox = $mp.Trim()
+            $effective.Preset  = 'folders'
         }
     }
 
