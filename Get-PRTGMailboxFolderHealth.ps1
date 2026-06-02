@@ -799,6 +799,15 @@ function Get-MailboxFolderHealth {
         Timestamp   = (Get-Date).ToString('o')
     }
 
+    # Union: any entry in OneHourFolders that is not yet in Folders is added,
+    # so -OneHourFolders 'X' alone (without -Folders 'X') still produces both
+    # the Total and the 1H channel for X. The relative order in -Folders is
+    # preserved; OneHourFolders-only entries are appended.
+    if ($OneHourFolders.Count -gt 0) {
+        $missing = $OneHourFolders | Where-Object { $Folders -notcontains $_ }
+        if ($missing) { $Folders = @($Folders) + @($missing) }
+    }
+
     if ($Mode -eq 'Graph') {
 
         $token = Get-GraphAccessToken `
@@ -962,10 +971,18 @@ function Format-PrtgKeyValue {
     if ($Health.Errors.Count -and $Health.Channels.Count -eq 0) {
         return "-1:$($Health.Errors -join ' | ')"
     }
+
+    # Intent: if -OneHourFolders was used, the Aged (1H) value is what the
+    # caller cares about - prefer it. Else fall back to the first Total.
     $first = $Health.Channels |
-             Where-Object { $_.Kind -eq 'Total' } |
+             Where-Object { $_.Kind -eq 'Aged' } |
              Select-Object -First 1
-    if (-not $first) { return "-1:no Total channel" }
+    if (-not $first) {
+        $first = $Health.Channels |
+                 Where-Object { $_.Kind -eq 'Total' } |
+                 Select-Object -First 1
+    }
+    if (-not $first) { return "-1:no channel produced" }
 
     $msg = "$($first.Channel)=$($first.Value)"
     if ($Health.Errors.Count) {
