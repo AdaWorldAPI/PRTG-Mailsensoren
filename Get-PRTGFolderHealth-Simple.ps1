@@ -8,9 +8,15 @@
 #     3 = CertificateThumbprint   (cert in LocalMachine\My OR CurrentUser\My)
 #     4 = Mailbox                 (e.g. mirai.bsm@bsm.datagroup.de)
 #     5 = FolderList              (';' delimited, e.g. Posteingang;Posteingang/VM Fehler)
+#                                 '+' = space (so placeholder5 needs no quoting):
+#                                   Posteingang/VM+Fehler  ==  "Posteingang/VM Fehler"
+#                                 Literal spaces still work if you quote the field.
 #                                 Per-token limits: 'Spec=warn:err' (e.g. Junk-E-Mail=3:10)
 #                                 or 'Spec=0' to disable limits (e.g. Posteingang/VM Ok=0).
 #                                 Bare 'Spec' uses the default warn 25 / err 100.
+#                                 Token '@1h:<folder>' adds a '<folder> 1H' aging channel
+#                                 (messages older than 60 min) - default warn 1 / err 5,
+#                                 overridable: @1h:Posteingang=2:5 (or =0 for reference).
 #                                 Special token '@quarantine' adds 5 Defender-for-O365
 #                                 quarantine channels for the mailbox (Total / Recent /
 #                                 Phish / Malware / Spam) via Graph Advanced Hunting.
@@ -165,7 +171,7 @@ function Get-FolderTotal {
     if ($WellKnown.ContainsKey($key)) {
         $r = Invoke-RestMethod -Headers $h -ErrorAction Stop `
                 -Uri "https://graph.microsoft.com/v1.0/users/$Mailbox/mailFolders/$($WellKnown[$key])"
-        return [pscustomobject]@{ Name=$r.displayName; Total=[int]$r.totalItemCount }
+        return [pscustomobject]@{ Name=$r.displayName; Total=[int]$r.totalItemCount; Id=$r.id }
     }
 
     $segments = $Spec -split '[\\/]' | Where-Object { $_ -ne '' }
@@ -185,7 +191,21 @@ function Get-FolderTotal {
         }
         $cur = $resp.value[0]; $parent = $cur.id
     }
-    return [pscustomobject]@{ Name=$cur.displayName; Total=[int]$cur.totalItemCount }
+    return [pscustomobject]@{ Name=$cur.displayName; Total=[int]$cur.totalItemCount; Id=$cur.id }
+}
+
+# 1H = count of message items older than $Minutes (default 60) in a folder -
+# a queue-stuck / SLA signal. $count=true returns @odata.count server-side
+# (no pagination cap). ConsistencyLevel:eventual is required for $count+$filter.
+function Get-AgedMessageCount {
+    param([string]$Mailbox, [string]$FolderId, [string]$Token, [int]$Minutes = 60)
+    $cutoff = (Get-Date).ToUniversalTime().AddMinutes(-$Minutes).ToString('yyyy-MM-ddTHH:mm:ssZ')
+    $filter = [Uri]::EscapeDataString("receivedDateTime lt $cutoff")
+    $uri    = "https://graph.microsoft.com/v1.0/users/$Mailbox/mailFolders/$FolderId/messages?`$count=true&`$top=1&`$filter=$filter&`$select=id"
+    $resp   = Invoke-RestMethod -Headers @{ Authorization = "Bearer $Token"; ConsistencyLevel = 'eventual' } `
+                -Uri $uri -ErrorAction Stop
+    if ($null -eq $resp.'@odata.count') { throw "Graph returned no @odata.count for the 1H query." }
+    return [int]$resp.'@odata.count'
 }
 
 # Defender-for-O365 quarantine counts for one mailbox via Graph Advanced Hunting
@@ -279,8 +299,10 @@ if ($Mailbox -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
     Emit-Error "ARG_MAILBOX: '$Mailbox' is not a valid address - likely truncated by an unquoted space in the Parameters field."
 }
 
-# Split folder list. A trailing/empty fragment or a stray quote = mangling signal.
-$folders = @($FolderRaw -split '[;|]' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+# Split folder list. '+' -> ' ' (space placeholder, same convention as the Graph
+# variant) so placeholder5 needs no quoting in the PRTG Parameters field; literal
+# spaces still pass through unchanged. A stray quote = mangling signal.
+$folders = @($FolderRaw -split '[;|]' | ForEach-Object { ($_ -replace '\+',' ').Trim() } | Where-Object { $_ -ne '' })
 if ($folders.Count -eq 0) { Emit-Error "FOLDER_LIST: no usable folders parsed from '$FolderRaw'." }
 $badFolderSyntax = @($folders | Where-Object { $_ -match "['""]" })
 if ($badFolderSyntax.Count -gt 0) {
@@ -319,6 +341,40 @@ $errors  = New-Object System.Collections.Generic.List[string]
 foreach ($f in $folders) {
     try {
         $p = Parse-FolderToken -Token $f   # 'Spec', 'Spec=warn:err', or 'Spec=0'
+
+        # Special token: '@1h:<folder>' -> aging channel (messages older than 60 min)
+        # for that folder. Limits default to warn 1 / err 5, overridable on the token
+        # (e.g. @1h:Posteingang=2:5); '@1h:<folder>=0' makes it reference-only.
+        if ($p.Spec -match '^@1h:(.+)$') {
+            $folderSpec = $Matches[1].Trim()
+            $fo   = Get-FolderTotal -Mailbox $Mailbox -Spec $folderSpec -Token $token
+            $aged = Get-AgedMessageCount -Mailbox $Mailbox -FolderId $fo.Id -Token $token
+            $name = Xml-Escape "$($fo.Name) 1H"
+            $w = if ($p.HasLimit -and $p.LimitMode -eq 1) { $p.Warn } else { 1 }
+            $e = if ($p.HasLimit -and $p.LimitMode -eq 1) { $p.Err }  else { 5 }
+            $limitBlock = if ($p.HasLimit -and $p.LimitMode -eq 0) {
+@"
+
+        <limitmode>0</limitmode>
+"@
+            } else {
+@"
+
+        <limitmode>1</limitmode>
+        <limitmaxwarning>$w</limitmaxwarning>
+        <limitmaxerror>$e</limitmaxerror>
+"@
+            }
+            $results.Add(@"
+    <result>
+        <channel>$name</channel>
+        <value>$aged</value>
+        <unit>Custom</unit>
+        <customunit>#</customunit>$limitBlock
+    </result>
+"@) | Out-Null
+            continue
+        }
 
         # Special token: '@quarantine' (or 'quarantine') -> Defender quarantine channels.
         if ($p.Spec -match '^@?quarantine$') {
