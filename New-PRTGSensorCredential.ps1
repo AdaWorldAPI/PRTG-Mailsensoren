@@ -155,7 +155,7 @@ function Write-Step {
 function ConvertFrom-SecureToPlain {
     param([securestring]$Secure)
     $bstr  = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Secure)
-    try   { return [Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr) }
+    try   { return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) }
     finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
 }
 

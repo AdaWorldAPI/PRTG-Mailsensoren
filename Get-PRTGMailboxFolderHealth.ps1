@@ -287,7 +287,7 @@ function Import-SensorConfig {
             try {
                 $sec   = ConvertTo-SecureString -String $prop.Value -ErrorAction Stop
                 $bstr  = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)
-                $plain = [Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
+                $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
                 [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
                 $cfg[$plainName] = $plain
             }
@@ -510,7 +510,7 @@ public struct CRED {
         try {
             $sec  = ConvertTo-SecureString -String $legacy -ErrorAction Stop
             $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)
-            $plain = [Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
+            $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
             [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
             return [pscustomobject]@{
                 Method                = 'LegacyDPAPI-CU'
@@ -560,8 +560,13 @@ function Get-GraphAccessToken {
             $cert = Get-ChildItem -Path "Cert:\LocalMachine\My\${CertificateThumbprint}" -ErrorAction Stop
         }
 
-        # Build client_assertion JWT
-        $now    = [int][double]::Parse((Get-Date -UFormat %s))
+        # Build client_assertion JWT.
+        # Epoch must be culture-invariant: on Windows PowerShell 5.1
+        # `Get-Date -UFormat %s` can emit a fractional value, and
+        # `[double]::Parse` under a comma-decimal locale (de-DE) then misreads
+        # the '.' as a thousands separator -> bogus nbf/exp -> AADSTS. Use the
+        # framework epoch instead (no parsing, no locale).
+        $now    = [int][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
         $jwtHdr = @{
             alg = 'RS256'
             typ = 'JWT'
@@ -584,9 +589,23 @@ function Get-GraphAccessToken {
                         -replace '\+','-' -replace '/','_' -replace '='
 
         $toSign  = "${b64Hdr}.${b64Body}"
-        $rsa     = $cert.PrivateKey
+
+        # Resolve a usable RSA private key. Try the CNG accessor first, then the
+        # legacy CSP property. Either may throw if the key material is absent on
+        # this machine (e.g. only the public cert was copied: certutil shows
+        # "keyset missing" even though HasPrivateKey reports True) or sits in an
+        # incompatible provider. Turn that into ONE clear, actionable error
+        # instead of a null-cascade (GetRSAPrivateKey -> $null.SignData ->
+        # ToBase64String($null) -> AADSTS700027 "Missing signature").
+        $rsa = $null
+        try { $rsa = [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($cert) } catch { }
+        if (-not $rsa) { try { $rsa = $cert.PrivateKey } catch { } }
         if (-not $rsa) {
-            $rsa = [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($cert)
+            throw ("Certificate ${CertificateThumbprint} has no USABLE private key on this machine " +
+                   "(provider/keyset missing or inaccessible). If you copied only the .cer, import the .pfx " +
+                   "(private key) into the same store, run on the host where the key was generated, or " +
+                   "re-provision with New-PRTGSensorCredential.ps1 -Method CertLM. Also ensure the running " +
+                   "account has read on the key file.")
         }
         $sigBytes = $rsa.SignData(
             [Text.Encoding]::UTF8.GetBytes($toSign),
@@ -1241,11 +1260,15 @@ function Format-PrtgJson {
             $channelObj.limitmaxerror   = $e
         }
 
-        # -1 = "not supported by this flavour" -> downgrade to error/skip
+        # -1 = "not supported by this flavour" (e.g. Legacy mode cannot age items).
+        # PRTG only errors when value > limitmaxerror, so limitmaxerror=0 would
+        # NEVER fire on a -1 value (the old behaviour silently stayed green).
+        # Use a LOWER bound so a negative sentinel actually turns the channel red.
         if ($c.Value -lt 0) {
-            $channelObj.limitmode       = 1
-            $channelObj.limitmaxerror   = 0
-            $channelObj.limitmaxwarning = 0
+            $channelObj.limitmode     = 1
+            $channelObj.limitminerror = 0      # error when value < 0
+            $channelObj.Remove('limitmaxwarning')
+            $channelObj.Remove('limitmaxerror')
         }
 
         $channels.Add([pscustomobject]$channelObj) | Out-Null
@@ -1324,8 +1347,10 @@ function Format-PrtgXml {
         $limitmode = if ($suppress) { 0 } else { 1 }
         $wOut = $w ; $eOut = $e
 
-        # -1 = not supported by this flavour -> force error limit
-        if ($c.Value -lt 0) { $limitmode = 1 ; $wOut = 0 ; $eOut = 0 ; $suppress = $false }
+        # -1 = not supported by this flavour -> error via a LOWER bound (a
+        # max-limit of 0 would never fire on a -1 value).
+        $isUnsupported = ($c.Value -lt 0)
+        if ($isUnsupported) { $limitmode = 1 }
 
         $xw.WriteStartElement('result')
         $xw.WriteElementString('channel',    [string]$c.Channel)
@@ -1335,8 +1360,13 @@ function Format-PrtgXml {
         $xw.WriteElementString('float',      '0')
         $xw.WriteElementString('limitmode',  [string]$limitmode)
         if ($limitmode -eq 1) {
-            $xw.WriteElementString('limitmaxwarning', [string]$wOut)
-            $xw.WriteElementString('limitmaxerror',   [string]$eOut)
+            if ($isUnsupported) {
+                $xw.WriteElementString('limitminerror', '0')   # error when value < 0
+            }
+            else {
+                $xw.WriteElementString('limitmaxwarning', [string]$wOut)
+                $xw.WriteElementString('limitmaxerror',   [string]$eOut)
+            }
         }
         $xw.WriteEndElement()   # result
     }
@@ -1404,7 +1434,9 @@ function Format-PrtgKeyValue {
         #   Aged (1H folder stuck-detection) -> QRecent (quarantine spike)
         #   -> Total (folder volume) -> QTotal (quarantine volume)
         foreach ($kind in 'Aged','QRecent','Total','QTotal') {
-            $pick = $Health.Channels | Where-Object { $_.Kind -eq $kind } | Select-Object -First 1
+            # Skip negative sentinels (e.g. Legacy 1H = -1 "not supported") so Auto
+            # never reports -1 when a real Total is available.
+            $pick = $Health.Channels | Where-Object { $_.Kind -eq $kind -and $_.Value -ge 0 } | Select-Object -First 1
             if ($pick) { break }
         }
     }
