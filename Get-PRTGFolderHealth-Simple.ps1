@@ -8,6 +8,9 @@
 #     3 = CertificateThumbprint   (cert in LocalMachine\My OR CurrentUser\My)
 #     4 = Mailbox                 (e.g. mirai.bsm@bsm.datagroup.de)
 #     5 = FolderList              (';' delimited, e.g. Posteingang;Posteingang/VM Fehler)
+#                                 Per-token limits: 'Spec=warn:err' (e.g. Junk-E-Mail=3:10)
+#                                 or 'Spec=0' to disable limits (e.g. Posteingang/VM Ok=0).
+#                                 Bare 'Spec' uses the default warn 25 / err 100.
 #                                 Special token '@quarantine' adds 5 Defender-for-O365
 #                                 quarantine channels for the mailbox (Total / Recent /
 #                                 Phish / Malware / Spam) via Graph Advanced Hunting.
@@ -227,6 +230,27 @@ EmailEvents
     }
 }
 
+# Per-token limit syntax (same as the Graph variant):
+#   'Spec'           -> default limits (folders warn 25 / err 100)
+#   'Spec=warn:err'  -> custom limits, e.g. Junk-E-Mail=3:10
+#   'Spec=0'         -> limits OFF (reference-only), e.g. Posteingang/VM Ok=0
+# For '@quarantine', the limit applies to the 'Quarantine Recent' channel
+# (e.g. @quarantine=2:5); '@quarantine=0' makes Recent reference-only too.
+# Returns @{ Spec; LimitMode; Warn; Err; HasLimit }.
+function Parse-FolderToken {
+    param([string]$Token)
+    $r  = @{ Spec = $Token; LimitMode = 1; Warn = 25; Err = 100; HasLimit = $false }
+    $eq = $Token.LastIndexOf('=')
+    if ($eq -gt 0) {
+        $r.Spec = $Token.Substring(0, $eq).Trim()
+        $lim    = $Token.Substring($eq + 1).Trim()
+        if ($lim -eq '0') { $r.LimitMode = 0; $r.HasLimit = $true }
+        elseif ($lim -match '^(\d+):(\d+)$') { $r.Warn = [int]$Matches[1]; $r.Err = [int]$Matches[2]; $r.HasLimit = $true }
+        else { throw "bad limit syntax '$lim' in token '$Token' (use =0 or =warn:err)." }
+    }
+    return $r
+}
+
 #----------------------------------------------------------------------------------------------------------
 # Main
 #----------------------------------------------------------------------------------------------------------
@@ -294,15 +318,22 @@ $errors  = New-Object System.Collections.Generic.List[string]
 
 foreach ($f in $folders) {
     try {
+        $p = Parse-FolderToken -Token $f   # 'Spec', 'Spec=warn:err', or 'Spec=0'
+
         # Special token: '@quarantine' (or 'quarantine') -> Defender quarantine channels.
-        if ($f -match '^@?quarantine$') {
+        if ($p.Spec -match '^@?quarantine$') {
             $q = Get-QuarantineCountsGraph -Mailbox $Mailbox -Token $token
             # Only 'Quarantine Recent' (last 60 min spike) alerts; Total/Phish/Malware/
-            # Spam are CUMULATIVE over the 30d window, so they are reference-only
+            # Spam are CUMULATIVE over the 30d window, so they stay reference-only
             # (alerting on a cumulative count would mean permanent red once any exist).
+            # Recent thresholds default to warn 5 / err 20, overridable on the token:
+            #   @quarantine=2:5  -> warn 2 / err 5    @quarantine=0 -> Recent reference-only
+            $qw = if ($p.HasLimit -and $p.LimitMode -eq 1) { $p.Warn } else { 5 }
+            $qe = if ($p.HasLimit -and $p.LimitMode -eq 1) { $p.Err }  else { 20 }
+            $qRecentAlerts = -not ($p.HasLimit -and $p.LimitMode -eq 0)
             $qChannels = @(
                 @{ Name='Quarantine Total';   Value=$q.Total;   Alert=$false },
-                @{ Name='Quarantine Recent';  Value=$q.Recent;  Alert=$true  },
+                @{ Name='Quarantine Recent';  Value=$q.Recent;  Alert=$qRecentAlerts },
                 @{ Name='Quarantine Phish';   Value=$q.Phish;   Alert=$false },
                 @{ Name='Quarantine Malware'; Value=$q.Malware; Alert=$false },
                 @{ Name='Quarantine Spam';    Value=$q.Spam;    Alert=$false }
@@ -312,8 +343,8 @@ foreach ($f in $folders) {
 @"
 
         <limitmode>1</limitmode>
-        <limitmaxwarning>5</limitmaxwarning>
-        <limitmaxerror>20</limitmaxerror>
+        <limitmaxwarning>$qw</limitmaxwarning>
+        <limitmaxerror>$qe</limitmaxerror>
 "@
                 } else {
 @"
@@ -333,17 +364,27 @@ foreach ($f in $folders) {
             continue
         }
 
-        $r    = Get-FolderTotal -Mailbox $Mailbox -Spec $f -Token $token
+        $r    = Get-FolderTotal -Mailbox $Mailbox -Spec $p.Spec -Token $token
         $name = Xml-Escape $r.Name
+        $limitBlock = if ($p.LimitMode -eq 1) {
+@"
+
+        <limitmode>1</limitmode>
+        <limitmaxwarning>$($p.Warn)</limitmaxwarning>
+        <limitmaxerror>$($p.Err)</limitmaxerror>
+"@
+        } else {
+@"
+
+        <limitmode>0</limitmode>
+"@
+        }
         $results.Add(@"
     <result>
         <channel>$name</channel>
         <value>$($r.Total)</value>
         <unit>Custom</unit>
-        <customunit>#</customunit>
-        <limitmode>1</limitmode>
-        <limitmaxwarning>25</limitmaxwarning>
-        <limitmaxerror>100</limitmaxerror>
+        <customunit>#</customunit>$limitBlock
     </result>
 "@) | Out-Null
     }
