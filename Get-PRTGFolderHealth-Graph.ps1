@@ -386,17 +386,12 @@ $body  = ($results -join "`r`n")
 $notes = @($errors + $warnings)
 if ($DiagFlag) { $notes += @("DIAG: " + ($diag -join ' ; ')) }
 
-if ($errors.Count) {
-    $text = Xml-Escape ($notes -join ' | ')
-    Write-Output @"
-<prtg>
-    <error>1</error>
-$body
-    <text>$text</text>
-</prtg>
-"@
-}
-elseif ($notes.Count) {
+# Partial failure must NOT emit <error>1</error> next to channels: PRTG would mark
+# the sensor Down AND discard every good channel's value for this scan (losing the
+# history on a single transient folder/429). With results present, keep the data and
+# surface the reason in <text> - matching the unified sensor's "error only when zero
+# channels" rule. The all-failed case (results.Count -eq 0) already Emit-Error'd above.
+if ($notes.Count) {
     $text = Xml-Escape ($notes -join ' | ')
     Write-Output @"
 <prtg>

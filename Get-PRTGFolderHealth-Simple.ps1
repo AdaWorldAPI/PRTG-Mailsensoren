@@ -457,13 +457,14 @@ if ($results.Count -eq 0) {
 
 $body = ($results -join "`r`n")
 
-# Channel name+value is the single source of truth. <text> only appears on partial
-# failure - to carry the error reason, which has nowhere else to live.
+# Partial failure must NOT emit <error>1</error> next to channels: PRTG would mark the
+# sensor Down AND discard every good channel's value for this scan. With results present,
+# keep the data and carry the reason in <text>. The all-failed case (results.Count -eq 0)
+# already Emit-Error'd above, so that still goes Down.
 if ($errors.Count) {
     $text = Xml-Escape ($errors -join ' | ')
     Write-Output @"
 <prtg>
-    <error>1</error>
 $body
     <text>$text</text>
 </prtg>
