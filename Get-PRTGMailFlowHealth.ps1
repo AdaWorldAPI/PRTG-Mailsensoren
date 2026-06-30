@@ -288,6 +288,7 @@ function Get-FlowMessages {
         [Parameter(Mandatory)] [datetime]$End,
         [string[]]$RecipientDomain = @(),
         [string]$Direction         = 'Both',
+        [string[]]$TenantDomain    = @(),   # used to classify Inbound/Outbound by sender
         [int]$ResultSize           = 5000,
         [int]$MaxPages             = 5
     )
@@ -348,14 +349,24 @@ function Get-FlowMessages {
         }
     }
 
-    if ($Direction -ne 'Both' -and $RecipientDomain.Count -gt 0) {
-        $domainsLower = $RecipientDomain | ForEach-Object { $_.ToLowerInvariant().TrimStart('@') }
-        $filtered = $filtered | Where-Object {
-            if (-not $_.SenderAddress) { return $true }
-            $sd = ($_.SenderAddress -split '@')[-1].ToLowerInvariant()
-            $isInternalSender = ($domainsLower -contains $sd)
-            if ($Direction -eq 'Inbound')  { return -not $isInternalSender }
-            if ($Direction -eq 'Outbound') { return $isInternalSender }
+    if ($Direction -ne 'Both') {
+        # Classify by sender against the tenant's own domains. Prefer an explicit
+        # TenantDomain (from -Organization); fall back to the recipient -Domain.
+        # If neither is known, do NOT silently return everything - warn so the
+        # operator knows the Direction filter was a no-op.
+        $dirDomains = if ($TenantDomain.Count -gt 0) { $TenantDomain } else { $RecipientDomain }
+        if ($dirDomains.Count -eq 0) {
+            Write-FlowLog "Direction='$Direction' requested but no -Domain/-Organization to classify sender against; Direction filter skipped (behaving as 'Both')." -Level Warn
+        }
+        else {
+            $domainsLower = $dirDomains | ForEach-Object { $_.ToLowerInvariant().TrimStart('@') }
+            $filtered = $filtered | Where-Object {
+                if (-not $_.SenderAddress) { return $true }
+                $sd = ($_.SenderAddress -split '@')[-1].ToLowerInvariant()
+                $isInternalSender = ($domainsLower -contains $sd)
+                if ($Direction -eq 'Inbound')  { return -not $isInternalSender }
+                if ($Direction -eq 'Outbound') { return $isInternalSender }
+            }
         }
     }
 
@@ -421,15 +432,21 @@ function Get-MailFlowHealth {
 
     $msgs = Get-FlowMessages -Start $start -End $end `
                 -RecipientDomain $Domain -Direction $Direction `
+                -TenantDomain @($Organization | Where-Object { $_ }) `
                 -ResultSize $ResultSize -MaxPages $MaxPages
 
     $totalCount = ($msgs | Measure-Object).Count
 
     $delivered = ($msgs | Where-Object { $_.Status -eq 'Delivered' }     | Measure-Object).Count
     $pending   = ($msgs | Where-Object { $_.Status -in 'Pending','GettingStatus','Deferred' } | Measure-Object).Count
-    $failedRaw = ($msgs | Where-Object { $_.Status -in 'Failed','Quarantined' }  | Measure-Object).Count
+    # 'Quarantined' is deliberately NOT treated as a mail-flow failure: a
+    # quarantined message with an innocuous subject would fall through the
+    # classifier to RealFailure and page on-call, contradicting the sensor's
+    # "don't page for spam noise" design. Quarantine monitoring belongs to the
+    # folder sensor (-IncludeQuarantine). Count Status='Failed' only.
+    $failedRaw = ($msgs | Where-Object { $_.Status -eq 'Failed' }  | Measure-Object).Count
 
-    $failed = $msgs | Where-Object { $_.Status -in 'Failed','Quarantined' }
+    $failed = $msgs | Where-Object { $_.Status -eq 'Failed' }
 
     $buckets = @{
         AutoReply         = 0
@@ -613,17 +630,23 @@ function Invoke-PRTGMailFlowSensor {
         }
     }
 
+    # Build a splat. NOTE: do NOT inline `(if ...)` as a command argument -
+    # `(if ...)` parses but throws at runtime ("The term 'if' is not recognized")
+    # because a bare parenthesised group in argument position is treated as a
+    # command. `$var = if (...) {...} else {...}` (statement-to-value) is fine.
+    $flowSplat = @{
+        ClientId              = $effective.ClientId
+        CertificateThumbprint = $effective.CertificateThumbprint
+        Organization          = $effective.Organization
+        Domain                = @($effective.Domain | ForEach-Object { $_ })
+        LookbackMinutes       = if ($effective.LookbackMinutes) { [int]$effective.LookbackMinutes } else { 15 }
+        Direction             = if ($effective.Direction)       { [string]$effective.Direction }    else { 'Both' }
+        DeepInspect           = [bool]$effective.DeepInspect
+        ResultSize            = if ($effective.TraceResultSize) { [int]$effective.TraceResultSize } else { 5000 }
+        MaxPages              = if ($effective.MaxTracePages)   { [int]$effective.MaxTracePages }   else { 5 }
+    }
     try {
-        $health = Get-MailFlowHealth `
-                    -ClientId              $effective.ClientId `
-                    -CertificateThumbprint $effective.CertificateThumbprint `
-                    -Organization          $effective.Organization `
-                    -Domain                ($effective.Domain        | ForEach-Object { $_ }) `
-                    -LookbackMinutes       (if ($effective.LookbackMinutes) { [int]$effective.LookbackMinutes } else { 15 }) `
-                    -Direction             (if ($effective.Direction)       { [string]$effective.Direction }    else { 'Both' }) `
-                    -DeepInspect:([bool]$effective.DeepInspect) `
-                    -ResultSize            (if ($effective.TraceResultSize) { [int]$effective.TraceResultSize } else { 5000 }) `
-                    -MaxPages              (if ($effective.MaxTracePages)   { [int]$effective.MaxTracePages }   else { 5 })
+        $health = Get-MailFlowHealth @flowSplat
     }
     catch {
         $err = $_.Exception.Message
