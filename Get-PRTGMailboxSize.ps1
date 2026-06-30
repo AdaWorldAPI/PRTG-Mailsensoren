@@ -166,13 +166,25 @@ try {
 }
 
 # --- Archive size (may not be enabled) ---
+# ONLY a genuinely-absent archive is benign (report 0, stays green). Any other
+# failure - throttling, a transient/session error, or an access/role problem -
+# is a real measurement failure and must surface as a PRTG error; reporting 0
+# would hide a large archive behind a green sensor.
 $archiveBytes = [int64]0
 $archiveNote  = $null
 try {
     $as = Get-MailboxStatistics -Identity $Mailbox -Archive -ErrorAction Stop
     $archiveBytes = ConvertTo-Bytes $as.TotalItemSize
 } catch {
-    $archiveNote = "no archive enabled / not accessible"
+    $em = $_.Exception.Message
+    $noArchive = ($em -match 'archive') -and
+                 ($em -match "isn.?t enabled|not enabled|isn.?t present|not present|doesn.?t exist|does not exist|no archive")
+    if ($noArchive) {
+        $archiveNote = "no archive enabled"
+    }
+    else {
+        Emit-Error "ARCHIVE_STATS: $em"
+    }
 }
 
 # --- Emit ---
