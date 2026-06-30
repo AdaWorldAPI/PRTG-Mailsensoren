@@ -8,6 +8,14 @@
 #     3 = CertificateThumbprint   (cert in LocalMachine\My OR CurrentUser\My)
 #     4 = Mailbox                 (e.g. mirai.bsm@bsm.datagroup.de)
 #     5 = FolderList              (';' delimited, e.g. Posteingang;Posteingang/VM Fehler)
+#                                 Special token '@quarantine' adds 5 Defender-for-O365
+#                                 quarantine channels for the mailbox (Total / Recent /
+#                                 Phish / Malware / Spam) via Graph Advanced Hunting.
+#                                 Needs app permission ThreatHunting.Read.All (admin
+#                                 consent). Only 'Quarantine Recent' (last 60 min) alerts;
+#                                 the others are cumulative-over-30d references. Pass it
+#                                 alone for a quarantine-only sensor, or mix with folders:
+#                                   Posteingang;Junk-E-Mail;@quarantine
 #
 # Iron-clad rules:
 #   - every arg is quote-stripped (handles ' " or none surviving PRTG's mangling)
@@ -177,6 +185,48 @@ function Get-FolderTotal {
     return [pscustomobject]@{ Name=$cur.displayName; Total=[int]$cur.totalItemCount }
 }
 
+# Defender-for-O365 quarantine counts for one mailbox via Graph Advanced Hunting
+# (EmailEvents, DeliveryLocation == 'Quarantine'). Pure REST - no EXO module.
+# Requires app permission ThreatHunting.Read.All (admin-consented). One KQL query
+# aggregates all buckets server-side. ~15-30 min ingestion latency on the Recent
+# bucket; Total is reliable.
+function Get-QuarantineCountsGraph {
+    param([string]$Mailbox, [string]$Token, [int]$LookbackDays = 30, [int]$RecentMinutes = 60)
+
+    $mb  = $Mailbox -replace "'", "''"   # KQL string-literal escape
+    $kql = @"
+EmailEvents
+| where Timestamp > ago($([int]$LookbackDays)d)
+| where RecipientEmailAddress == '$mb'
+| where DeliveryLocation == 'Quarantine'
+| extend Bucket = case(
+    ThreatTypes has 'Phish', 'Phish',
+    ThreatTypes has 'Malware', 'Malware',
+    ThreatTypes has 'Spam', 'Spam',
+    'Other')
+| summarize Total=count(),
+            Recent=countif(Timestamp > ago($([int]$RecentMinutes)m)),
+            Phish=countif(Bucket == 'Phish'),
+            Malware=countif(Bucket == 'Malware'),
+            Spam=countif(Bucket == 'Spam')
+"@
+    $body = @{ Query = $kql } | ConvertTo-Json
+    $resp = Invoke-RestMethod -Method POST `
+                -Uri 'https://graph.microsoft.com/v1.0/security/runHuntingQuery' `
+                -Headers @{ Authorization = "Bearer $Token"; 'Content-Type' = 'application/json' } `
+                -Body $body -ErrorAction Stop
+
+    $r = @($resp.results) | Select-Object -First 1
+    if (-not $r) { return [pscustomobject]@{ Total=0; Recent=0; Phish=0; Malware=0; Spam=0 } }
+    return [pscustomobject]@{
+        Total   = [int]$r.Total
+        Recent  = [int]$r.Recent
+        Phish   = [int]$r.Phish
+        Malware = [int]$r.Malware
+        Spam    = [int]$r.Spam
+    }
+}
+
 #----------------------------------------------------------------------------------------------------------
 # Main
 #----------------------------------------------------------------------------------------------------------
@@ -244,6 +294,45 @@ $errors  = New-Object System.Collections.Generic.List[string]
 
 foreach ($f in $folders) {
     try {
+        # Special token: '@quarantine' (or 'quarantine') -> Defender quarantine channels.
+        if ($f -match '^@?quarantine$') {
+            $q = Get-QuarantineCountsGraph -Mailbox $Mailbox -Token $token
+            # Only 'Quarantine Recent' (last 60 min spike) alerts; Total/Phish/Malware/
+            # Spam are CUMULATIVE over the 30d window, so they are reference-only
+            # (alerting on a cumulative count would mean permanent red once any exist).
+            $qChannels = @(
+                @{ Name='Quarantine Total';   Value=$q.Total;   Alert=$false },
+                @{ Name='Quarantine Recent';  Value=$q.Recent;  Alert=$true  },
+                @{ Name='Quarantine Phish';   Value=$q.Phish;   Alert=$false },
+                @{ Name='Quarantine Malware'; Value=$q.Malware; Alert=$false },
+                @{ Name='Quarantine Spam';    Value=$q.Spam;    Alert=$false }
+            )
+            foreach ($qc in $qChannels) {
+                $limitBlock = if ($qc.Alert) {
+@"
+
+        <limitmode>1</limitmode>
+        <limitmaxwarning>5</limitmaxwarning>
+        <limitmaxerror>20</limitmaxerror>
+"@
+                } else {
+@"
+
+        <limitmode>0</limitmode>
+"@
+                }
+                $results.Add(@"
+    <result>
+        <channel>$($qc.Name)</channel>
+        <value>$($qc.Value)</value>
+        <unit>Custom</unit>
+        <customunit>#</customunit>$limitBlock
+    </result>
+"@) | Out-Null
+            }
+            continue
+        }
+
         $r    = Get-FolderTotal -Mailbox $Mailbox -Spec $f -Token $token
         $name = Xml-Escape $r.Name
         $results.Add(@"
