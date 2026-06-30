@@ -8,6 +8,9 @@
 #     3 = CertificateThumbprint   (cert in LocalMachine\My OR CurrentUser\My)
 #     4 = Mailbox                 (e.g. mirai.bsm@bsm.datagroup.de)
 #     5 = FolderList              (';' delimited, e.g. Posteingang;Posteingang/VM Fehler)
+#                                 '+' = space (so placeholder5 needs no quoting):
+#                                   Posteingang/VM+Fehler  ==  "Posteingang/VM Fehler"
+#                                 Literal spaces still work if you quote the field.
 #                                 Per-token limits: 'Spec=warn:err' (e.g. Junk-E-Mail=3:10)
 #                                 or 'Spec=0' to disable limits (e.g. Posteingang/VM Ok=0).
 #                                 Bare 'Spec' uses the default warn 25 / err 100.
@@ -296,8 +299,10 @@ if ($Mailbox -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
     Emit-Error "ARG_MAILBOX: '$Mailbox' is not a valid address - likely truncated by an unquoted space in the Parameters field."
 }
 
-# Split folder list. A trailing/empty fragment or a stray quote = mangling signal.
-$folders = @($FolderRaw -split '[;|]' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+# Split folder list. '+' -> ' ' (space placeholder, same convention as the Graph
+# variant) so placeholder5 needs no quoting in the PRTG Parameters field; literal
+# spaces still pass through unchanged. A stray quote = mangling signal.
+$folders = @($FolderRaw -split '[;|]' | ForEach-Object { ($_ -replace '\+',' ').Trim() } | Where-Object { $_ -ne '' })
 if ($folders.Count -eq 0) { Emit-Error "FOLDER_LIST: no usable folders parsed from '$FolderRaw'." }
 $badFolderSyntax = @($folders | Where-Object { $_ -match "['""]" })
 if ($badFolderSyntax.Count -gt 0) {
