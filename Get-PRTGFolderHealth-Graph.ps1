@@ -25,7 +25,7 @@
 #   %scriptplaceholder1 = TenantId
 #   %scriptplaceholder2 = ClientId
 #   %scriptplaceholder3 = CertificateThumbprint   (LocalMachine\My or CurrentUser\My of probe account)
-#   %scriptplaceholder4 = Mailbox                 (robo.bsm@bsm.datagroup.de)
+#   %scriptplaceholder4 = Mailbox                 (mailbox@contoso.de)
 #   %scriptplaceholder5 = FolderList              (';' delimited displayName paths)
 #   Parameter6          = OneHourList  [optional] (Literal! ';' delimited subset -> extra "<name> 1H" channels)
 #   Parameter7          = diag         [optional] (Literal! 'diag' -> resolution details in <text>)

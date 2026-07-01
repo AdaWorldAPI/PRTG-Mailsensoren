@@ -9,7 +9,7 @@
 #   1 = TenantId               (kept for credential-set parity; not used by EXO connect)
 #   2 = ClientId
 #   3 = CertificateThumbprint  (LocalMachine\My or CurrentUser\My on the probe)
-#   4 = Mailbox                (e.g. robo.bsm@bsm.datagroup.de)
+#   4 = Mailbox                (e.g. mailbox@contoso.de)
 #   5 = Options [optional]     ';'-delimited key=value, all optional:
 #         warn=35  err=40        primary mailbox GB thresholds (default warn 35 / err 40)
 #         awarn=35 aerr=40       archive       GB thresholds (default warn 35 / err 40)

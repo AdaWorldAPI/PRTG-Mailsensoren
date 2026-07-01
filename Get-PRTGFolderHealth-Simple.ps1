@@ -6,7 +6,7 @@
 #     1 = TenantId
 #     2 = ClientId
 #     3 = CertificateThumbprint   (cert in LocalMachine\My OR CurrentUser\My)
-#     4 = Mailbox                 (e.g. mirai.bsm@bsm.datagroup.de)
+#     4 = Mailbox                 (e.g. mailbox@contoso.de)
 #     5 = FolderList              (';' delimited, e.g. Posteingang;Posteingang/VM Fehler)
 #                                 '+' = space (so placeholder5 needs no quoting):
 #                                   Posteingang/VM+Fehler  ==  "Posteingang/VM Fehler"
