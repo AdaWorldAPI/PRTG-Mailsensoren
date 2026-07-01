@@ -31,11 +31,11 @@
 
 .EXAMPLE
     # Probe service account
-    .\Grant-PRTGSensorAccess.ps1 -Identity 'DGDC\svc_prtgprobe'
+    .\Grant-PRTGSensorAccess.ps1 -Identity 'DOMAIN\svc_prtgprobe'
 
 .EXAMPLE
     # Probe + colleague
-    .\Grant-PRTGSensorAccess.ps1 -Identity 'DGDC\svc_prtgprobe','DGDC\T1.Mueller'
+    .\Grant-PRTGSensorAccess.ps1 -Identity 'DOMAIN\svc_prtgprobe','DOMAIN\T1.User'
 
 .NOTES
     Requires elevated PowerShell. Idempotent - existing rules for the same

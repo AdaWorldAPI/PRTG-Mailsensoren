@@ -25,7 +25,7 @@
 #   %scriptplaceholder1 = TenantId
 #   %scriptplaceholder2 = ClientId
 #   %scriptplaceholder3 = CertificateThumbprint   (LocalMachine\My or CurrentUser\My of probe account)
-#   %scriptplaceholder4 = Mailbox                 (robo.bsm@bsm.datagroup.de)
+#   %scriptplaceholder4 = Mailbox                 (mailbox@contoso.de)
 #   %scriptplaceholder5 = FolderList              (';' delimited displayName paths)
 #   Parameter6          = OneHourList  [optional] (Literal! ';' delimited subset -> extra "<name> 1H" channels)
 #   Parameter7          = diag         [optional] (Literal! 'diag' -> resolution details in <text>)
@@ -43,6 +43,12 @@
 #   Posteingang/VM Fehler                -> nested via displayName traversal, limits 25/100
 #   Posteingang/VM Ok=0                  -> limits OFF (archive sink, 3460 items is fine)
 #   Posteingang/VM Fehler=5:20           -> custom warning:error
+#   @quarantine                          -> 5 Defender-for-O365 channels (Total / Recent /
+#                                           Phish / Malware / Spam) via Advanced Hunting.
+#                                           Needs app perm ThreatHunting.Read.All. Only
+#                                           'Quarantine Recent' (last 60 min) alerts -
+#                                           default warn 5 / err 20, overridable
+#                                           @quarantine=2:5 (or =0 for reference-only).
 #
 # SPACE PLACEHOLDER:  '+' wird in FolderList und OneHourList zu ' ' uebersetzt.
 #   Damit braucht placeholder5/6 im PRTG Parameters-Feld KEIN Quoting mehr:
@@ -236,19 +242,54 @@ function Get-AgedMessageCount {
     return [int]$resp.'@odata.count'
 }
 
-# Token "Pfad=warn:err" | "Pfad=0" | "Pfad" -> @{ Spec; LimitMode; Warn; Err }
+# Defender-for-O365 quarantine counts for one mailbox via Graph Advanced Hunting
+# (EmailEvents, DeliveryLocation == 'Quarantine'). Pure REST, no EXO module.
+# Requires app permission ThreatHunting.Read.All (admin-consented). ~15-30 min
+# ingestion latency on the Recent bucket; Total (lookback window) is reliable.
+function Get-QuarantineCountsGraph {
+    param([string]$Mailbox, [string]$Token, [int]$LookbackDays = 30, [int]$RecentMinutes = 60)
+    $mb  = $Mailbox -replace "'", "''"
+    $kql = @"
+EmailEvents
+| where Timestamp > ago($([int]$LookbackDays)d)
+| where RecipientEmailAddress == '$mb'
+| where DeliveryLocation == 'Quarantine'
+| extend Bucket = case(
+    ThreatTypes has 'Phish', 'Phish',
+    ThreatTypes has 'Malware', 'Malware',
+    ThreatTypes has 'Spam', 'Spam',
+    'Other')
+| summarize Total=count(),
+            Recent=countif(Timestamp > ago($([int]$RecentMinutes)m)),
+            Phish=countif(Bucket == 'Phish'),
+            Malware=countif(Bucket == 'Malware'),
+            Spam=countif(Bucket == 'Spam')
+"@
+    $body = @{ Query = $kql } | ConvertTo-Json
+    $resp = Invoke-RestMethod -Method POST `
+                -Uri 'https://graph.microsoft.com/v1.0/security/runHuntingQuery' `
+                -Headers @{ Authorization = "Bearer $Token"; 'Content-Type' = 'application/json' } `
+                -Body $body -ErrorAction Stop
+    $r = @($resp.results) | Select-Object -First 1
+    if (-not $r) { return [pscustomobject]@{ Total=0; Recent=0; Phish=0; Malware=0; Spam=0 } }
+    return [pscustomobject]@{
+        Total=[int]$r.Total; Recent=[int]$r.Recent; Phish=[int]$r.Phish; Malware=[int]$r.Malware; Spam=[int]$r.Spam
+    }
+}
+
+# Token "Pfad=warn:err" | "Pfad=0" | "Pfad" -> @{ Spec; LimitMode; Warn; Err; HasLimit }
 function Parse-FolderToken {
     param([string]$Token)
-    $spec = $Token; $mode = 1; $w = 25; $e = 100
+    $spec = $Token; $mode = 1; $w = 25; $e = 100; $hasLimit = $false
     $eq = $Token.LastIndexOf('=')
     if ($eq -gt 0) {
         $spec = $Token.Substring(0, $eq).Trim()
         $lim  = $Token.Substring($eq + 1).Trim()
-        if ($lim -eq '0') { $mode = 0 }
-        elseif ($lim -match '^(\d+):(\d+)$') { $w = [int]$Matches[1]; $e = [int]$Matches[2] }
+        if ($lim -eq '0') { $mode = 0; $hasLimit = $true }
+        elseif ($lim -match '^(\d+):(\d+)$') { $w = [int]$Matches[1]; $e = [int]$Matches[2]; $hasLimit = $true }
         else { throw "bad limit syntax '$lim' in token '$Token' (use =0 or =warn:err)." }
     }
-    return @{ Spec = $spec; LimitMode = $mode; Warn = $w; Err = $e }
+    return @{ Spec = $spec; LimitMode = $mode; Warn = $w; Err = $e; HasLimit = $hasLimit }
 }
 
 #----------------------------------------------------------------------------------------------------------
@@ -321,6 +362,51 @@ $seenChan = @{}
 foreach ($tok in $folderTokens) {
     try {
         $cfg    = Parse-FolderToken -Token $tok
+
+        # Special token: '@quarantine' (or 'quarantine') -> 5 Defender channels.
+        # Only 'Quarantine Recent' (last 60 min spike) alerts (default warn 5/err 20,
+        # overridable: @quarantine=2:5 ; @quarantine=0 -> Recent reference-only). The
+        # cumulative buckets (Total/Phish/Malware/Spam) stay reference-only.
+        if ($cfg.Spec -match '^@?quarantine$') {
+            $q  = Get-QuarantineCountsGraph -Mailbox $Mailbox -Token $token
+            $qw = if ($cfg.HasLimit -and $cfg.LimitMode -eq 1) { $cfg.Warn } else { 5 }
+            $qe = if ($cfg.HasLimit -and $cfg.LimitMode -eq 1) { $cfg.Err }  else { 20 }
+            $qRecentAlerts = -not ($cfg.HasLimit -and $cfg.LimitMode -eq 0)
+            foreach ($qc in @(
+                @{ Name='Quarantine Total';   Value=$q.Total;   Alert=$false },
+                @{ Name='Quarantine Recent';  Value=$q.Recent;  Alert=$qRecentAlerts },
+                @{ Name='Quarantine Phish';   Value=$q.Phish;   Alert=$false },
+                @{ Name='Quarantine Malware'; Value=$q.Malware; Alert=$false },
+                @{ Name='Quarantine Spam';    Value=$q.Spam;    Alert=$false }
+            )) {
+                if ($seenChan.ContainsKey($qc.Name)) { continue }
+                $seenChan[$qc.Name] = $true
+                $qlimit = if ($qc.Alert) {
+@"
+
+        <limitmode>1</limitmode>
+        <limitmaxwarning>$qw</limitmaxwarning>
+        <limitmaxerror>$qe</limitmaxerror>
+"@
+                } else {
+@"
+
+        <limitmode>0</limitmode>
+"@
+                }
+                $results.Add(@"
+    <result>
+        <channel>$($qc.Name)</channel>
+        <value>$($qc.Value)</value>
+        <unit>Custom</unit>
+        <customunit>#</customunit>
+        <float>0</float>$qlimit
+    </result>
+"@) | Out-Null
+            }
+            continue
+        }
+
         $folder = Resolve-Folder -Mailbox $Mailbox -Spec $cfg.Spec -Token $token -Warnings $warnings
         $name   = [string]$folder.displayName
         if ($seenChan.ContainsKey($name)) { throw "duplicate channel name '$name' - leaf names must be unique per sensor." }

@@ -138,8 +138,8 @@ param(
     # PRTG 5-placeholder squeeze: carries "mailbox;preset" in a single field so
     # mailbox and profile fit one placeholder. Split on the FIRST ';' only.
     # Missing/empty preset part falls back to 'folders'. Overrides -Mailbox/-Preset.
-    #   robo.bsm@bsm.datagroup.de;kv-1h   -> Mailbox + Preset kv-1h
-    #   robo.bsm@bsm.datagroup.de         -> Mailbox + Preset folders (fallback)
+    #   mailbox@contoso.de;kv-1h   -> Mailbox + Preset kv-1h
+    #   mailbox@contoso.de         -> Mailbox + Preset folders (fallback)
     [Parameter(Position = 3)]
     [string]$MailboxPreset,
 

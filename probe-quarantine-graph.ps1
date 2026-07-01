@@ -5,7 +5,7 @@
 [CmdletBinding()]
 param(
     [string]$ConfigPath  = 'C:\ProgramData\PRTGSensors\folderhealth.json',
-    [string]$TestMailbox = 'mirai.bsm@bsm.datagroup.de',
+    [string]$TestMailbox = 'mailbox@contoso.de',
     [int]$LookbackDays   = 30
 )
 
