@@ -154,7 +154,11 @@ function Get-GraphToken {
     return $resp.access_token
 }
 
-# Well-known DE/EN folder shortcuts -> Graph well-known id
+# DE/EN display-name shortcuts -> Graph's REAL well-known folder ids. Graph DOES
+# support well-known names (17 of them, locale-independent, e.g. GET /mailFolders/inbox),
+# so this is a valid mapping, not an EWS-style emulation. Caveat: 'archive' resolves the
+# One-Click Archive FOLDER in the PRIMARY mailbox, NOT the online/In-Place Archive
+# mailbox. Any spec not in this map falls through to displayName traversal below.
 $WellKnown = @{
     'inbox'='inbox'; 'posteingang'='inbox'; 'sentitems'='sentitems'; 'gesendete'='sentitems'
     'drafts'='drafts'; 'entwuerfe'='drafts'; 'deleteditems'='deleteditems'; 'geloescht'='deleteditems'
