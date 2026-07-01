@@ -43,6 +43,10 @@
 #   Posteingang/VM Fehler                -> nested via displayName traversal, limits 25/100
 #   Posteingang/VM Ok=0                  -> limits OFF (archive sink, 3460 items is fine)
 #   Posteingang/VM Fehler=5:20           -> custom warning:error
+#   @1h:Posteingang                      -> "<folder> 1H" aging channel (messages older than
+#                                           60 min), default warn 1 / err 5, overridable
+#                                           @1h:Posteingang=2:5 (or =0 for reference).
+#                                           Inline alternative to the Parameter6 OneHourList.
 #   @quarantine                          -> 5 Defender-for-O365 channels (Total / Recent /
 #                                           Phish / Malware / Spam) via Advanced Hunting.
 #                                           Needs app perm ThreatHunting.Read.All. Only
@@ -404,6 +408,46 @@ foreach ($tok in $folderTokens) {
     </result>
 "@) | Out-Null
             }
+            continue
+        }
+
+        # Special token: '@1h:<folder>' -> aging channel (messages older than 60 min) for
+        # that folder. Default warn 1 / err 5, overridable (@1h:Posteingang=2:5);
+        # '@1h:<folder>=0' -> reference-only. Inline alternative to the Parameter6
+        # OneHourList (which applies a fixed 1/5 to every folder in it).
+        if ($cfg.Spec -match '^@1h:(.+)$') {
+            $folderSpec = $Matches[1].Trim()
+            $folder = Resolve-Folder -Mailbox $Mailbox -Spec $folderSpec -Token $token -Warnings $warnings
+            $chName = "$($folder.displayName) 1H"
+            if ($seenChan.ContainsKey($chName)) { throw "duplicate channel name '$chName' - leaf names must be unique per sensor." }
+            $seenChan[$chName] = $true
+            $aged  = Get-AgedMessageCount -Mailbox $Mailbox -FolderId $folder.id -Token $token
+            if ($DiagFlag) { $diag.Add("@1h $folderSpec -> aged=$aged") | Out-Null }
+            $nameX = Xml-Escape $chName
+            $w = if ($cfg.HasLimit -and $cfg.LimitMode -eq 1) { $cfg.Warn } else { 1 }
+            $e = if ($cfg.HasLimit -and $cfg.LimitMode -eq 1) { $cfg.Err }  else { 5 }
+            $limitBlock = if ($cfg.HasLimit -and $cfg.LimitMode -eq 0) {
+@"
+
+        <limitmode>0</limitmode>
+"@
+            } else {
+@"
+
+        <limitmode>1</limitmode>
+        <limitmaxwarning>$w</limitmaxwarning>
+        <limitmaxerror>$e</limitmaxerror>
+"@
+            }
+            $results.Add(@"
+    <result>
+        <channel>$nameX</channel>
+        <value>$aged</value>
+        <unit>Custom</unit>
+        <customunit>#</customunit>
+        <float>0</float>$limitBlock
+    </result>
+"@) | Out-Null
             continue
         }
 
